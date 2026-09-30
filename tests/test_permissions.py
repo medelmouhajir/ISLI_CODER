@@ -38,9 +38,11 @@ def test_permission_gate_session_approval():
 
 def test_permission_rules_deny():
     """Deny rules block matching commands."""
-    gate = PermissionGate(rules=[
-        PermissionRule(tool="bash", pattern="rm -rf *", action=RuleAction.DENY),
-    ])
+    gate = PermissionGate(
+        rules=[
+            PermissionRule(tool="bash", pattern="rm -rf *", action=RuleAction.DENY),
+        ]
+    )
     assert gate.is_denied("bash", {"command": "rm -rf /"})
     assert gate.is_denied("bash", {"command": "rm -rf /home"})
     assert not gate.is_denied("bash", {"command": "rm file.txt"})
@@ -48,10 +50,12 @@ def test_permission_rules_deny():
 
 def test_permission_rules_allow():
     """Allow rules skip approval prompt."""
-    gate = PermissionGate(rules=[
-        PermissionRule(tool="bash", pattern="npm test *", action=RuleAction.ALLOW),
-        PermissionRule(tool="bash", pattern="pytest *", action=RuleAction.ALLOW),
-    ])
+    gate = PermissionGate(
+        rules=[
+            PermissionRule(tool="bash", pattern="npm test *", action=RuleAction.ALLOW),
+            PermissionRule(tool="bash", pattern="pytest *", action=RuleAction.ALLOW),
+        ]
+    )
     assert not gate.requires_approval("bash", {"command": "npm test --verbose"})
     assert not gate.requires_approval("bash", {"command": "pytest tests/"})
     assert gate.requires_approval("bash", {"command": "npm install evil-pkg"})
@@ -59,10 +63,12 @@ def test_permission_rules_allow():
 
 def test_permission_rules_deny_precedence():
     """Deny rules take precedence over allow rules."""
-    gate = PermissionGate(rules=[
-        PermissionRule(tool="bash", pattern="git *", action=RuleAction.ALLOW),
-        PermissionRule(tool="bash", pattern="git push --force *", action=RuleAction.DENY),
-    ])
+    gate = PermissionGate(
+        rules=[
+            PermissionRule(tool="bash", pattern="git *", action=RuleAction.ALLOW),
+            PermissionRule(tool="bash", pattern="git push --force *", action=RuleAction.DENY),
+        ]
+    )
     assert not gate.requires_approval("bash", {"command": "git status"})
     assert gate.is_denied("bash", {"command": "git push --force origin main"})
 
@@ -88,9 +94,12 @@ def test_mode_robot_accepts_all():
     assert not gate.requires_approval("bash", {"command": "rm -rf /tmp/x"})
     assert not gate.requires_approval("git", {"action": "push"})
     # Deny rules still block in robot mode
-    gate = PermissionGate(mode=Mode.ROBOT, rules=[
-        PermissionRule(tool="bash", pattern="rm -rf *", action=RuleAction.DENY),
-    ])
+    gate = PermissionGate(
+        mode=Mode.ROBOT,
+        rules=[
+            PermissionRule(tool="bash", pattern="rm -rf *", action=RuleAction.DENY),
+        ],
+    )
     assert gate.is_denied("bash", {"command": "rm -rf /"})
 
 

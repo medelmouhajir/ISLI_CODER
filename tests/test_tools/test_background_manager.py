@@ -33,7 +33,7 @@ class TestBackgroundManager:
     ) -> None:
         """Background task output is captured to file."""
         task = background_manager.launch(
-            command='python -c "print(\'hello_bg\')"',
+            command="python -c \"print('hello_bg')\"",
             cwd=temp_project_dir,
         )
         # Wait for it to finish

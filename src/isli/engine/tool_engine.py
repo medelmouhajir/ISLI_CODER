@@ -58,14 +58,16 @@ class ToolEngine:
         defs = []
         for tool in self._tools.values():
             s = tool.schema()
-            defs.append({
-                "type": "function",
-                "function": {
-                    "name": s.name,
-                    "description": s.description,
-                    "parameters": s.parameters,
-                },
-            })
+            defs.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": s.name,
+                        "description": s.description,
+                        "parameters": s.parameters,
+                    },
+                }
+            )
         return defs
 
     def get_schema(self, name: str) -> ToolSchema | None:
@@ -73,7 +75,16 @@ class ToolEngine:
         tool = self._tools.get(name)
         return tool.schema() if tool else None
 
-    def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+    def get_tool(self, name: str) -> BaseTool | None:
+        """Retrieve a registered tool instance by name."""
+        return self._tools.get(name)
+
+    def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        cancel_event: Any | None = None,
+    ) -> ToolResult:
         """Execute a tool and return a ToolResult with caching and token gate."""
         if name not in self._tools:
             return ToolResult(
@@ -103,7 +114,11 @@ class ToolEngine:
                 return ToolResult(name=name, output=cached_output, success=True, latency_ms=latency)
 
         try:
-            output = tool.execute(**arguments)
+            call_kwargs = dict(arguments)
+            if name == "bash" and cancel_event is not None:
+                call_kwargs["cancel_event"] = cancel_event
+
+            output = tool.execute(**call_kwargs)
             if name in {"write", "edit"}:
                 self._search_generation += 1
             raw_tokens = count_tokens(output)
@@ -140,11 +155,13 @@ class ToolEngine:
             )
         except Exception as e:
             latency = (time.perf_counter() - t0) * 1000
-            error = json.dumps({
-                "error": type(e).__name__,
-                "message": str(e),
-                "hint": "Check arguments and try again.",
-            })
+            error = json.dumps(
+                {
+                    "error": type(e).__name__,
+                    "message": str(e),
+                    "hint": "Check arguments and try again.",
+                }
+            )
             log.warning(f"Tool {name} failed: {e}")
             return ToolResult(name=name, output=error, success=False, latency_ms=latency)
 

@@ -107,9 +107,7 @@ def compact_history(
     capped_recent = []
     for m in recent_turns:
         if m.get("role") == "tool":
-            capped_recent.append(
-                {**m, "content": _cap_content(m.get("content", ""), 2000)}
-            )
+            capped_recent.append({**m, "content": _cap_content(m.get("content", ""), 2000)})
         else:
             capped_recent.append(m)
     recent_turns = capped_recent
@@ -183,9 +181,7 @@ def compact_history_smart(
     capped_recent = []
     for m in recent_turns:
         if m.get("role") == "tool":
-            capped_recent.append(
-                {**m, "content": _cap_content(m.get("content", ""), 2000)}
-            )
+            capped_recent.append({**m, "content": _cap_content(m.get("content", ""), 2000)})
         else:
             capped_recent.append(m)
     recent_turns = capped_recent

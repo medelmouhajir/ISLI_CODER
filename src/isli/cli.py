@@ -96,12 +96,21 @@ def render_token_bar(
     session_manager: SessionManager | None = None,
     mode: Mode = Mode.NORMAL,
     loop_scheduler: Any = None,
+    keeper: Any = None,
+    terminal_width: int = 120,
 ) -> str:
     """Render a status bar with workspace folder, model, mode, context %, and usage."""
     from isli.ui.prompts import render_token_bar as _render_token_bar
 
     return _render_token_bar(
-        agent, budget, project_root, session_manager, mode, loop_scheduler=loop_scheduler
+        agent,
+        budget,
+        project_root,
+        session_manager,
+        mode,
+        loop_scheduler=loop_scheduler,
+        keeper=keeper,
+        terminal_width=terminal_width,
     )
 
 
@@ -475,8 +484,7 @@ def main() -> None:
             return
         except Exception as e:
             console.print(
-                f"[yellow]Full-screen UI unavailable ({e}); "
-                f"falling back to classic REPL.[/yellow]"
+                f"[yellow]Full-screen UI unavailable ({e}); falling back to classic REPL.[/yellow]"
             )
 
     print_banner(config, project_root, loop.permission_gate.mode, mcp_manager)
@@ -530,6 +538,8 @@ def main() -> None:
                 session_mgr,
                 loop.permission_gate.mode,
                 loop_scheduler=commands.loop_scheduler,
+                keeper=loop.keeper,
+                terminal_width=console.width,
             )
             console.print(status_line)
             mode_info = MODE_INFO[loop.permission_gate.mode]
@@ -542,15 +552,10 @@ def main() -> None:
             if prompt_session is not None:
                 if HTML is not None:
                     user_input = prompt_session.prompt(
-                        HTML(
-                            f"<cyan><b>isli</b></cyan> {prompt_tag}"
-                            f"<green><b>❯</b></green> "
-                        )
+                        HTML(f"<cyan><b>isli</b></cyan> {prompt_tag}<green><b>❯</b></green> ")
                     ).strip()
                 else:
-                    user_input = prompt_session.prompt(
-                        f"isli {mode_info.label} ❯ "
-                    ).strip()
+                    user_input = prompt_session.prompt(f"isli {mode_info.label} ❯ ").strip()
             else:
                 user_input = console.input(
                     f"[bold cyan]isli[/bold cyan] {prompt_tag}[bold green]❯[/bold green] "

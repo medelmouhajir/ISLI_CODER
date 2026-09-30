@@ -88,11 +88,13 @@ class GrepTool(BaseTool):
                 with p.open("r", encoding="utf-8", errors="replace") as f:
                     for line_no, line in enumerate(f, start=1):
                         if regex.search(line):
-                            raw_results.append({
-                                "file": rel,
-                                "line": line_no,
-                                "text": line.rstrip("\r\n"),
-                            })
+                            raw_results.append(
+                                {
+                                    "file": rel,
+                                    "line": line_no,
+                                    "text": line.rstrip("\r\n"),
+                                }
+                            )
                             if len(raw_results) >= 200:
                                 break
             except Exception:
@@ -114,8 +116,5 @@ class GrepTool(BaseTool):
         else:
             final_results = raw_results[:max_results]
 
-        lines = [
-            f"{r['file']}:{r['line']}: {r['text']}"
-            for r in final_results
-        ]
+        lines = [f"{r['file']}:{r['line']}: {r['text']}" for r in final_results]
         return "\n".join(lines)

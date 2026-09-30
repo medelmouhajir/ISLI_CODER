@@ -131,8 +131,7 @@ class ContextManager:
                     continue
 
                 dirnames[:] = [
-                    d for d in dirnames
-                    if d not in IGNORE_DIRS and not d.startswith(".")
+                    d for d in dirnames if d not in IGNORE_DIRS and not d.startswith(".")
                 ]
 
                 indent = "  " * depth

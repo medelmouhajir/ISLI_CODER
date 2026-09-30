@@ -17,22 +17,19 @@ Supports:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
 import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from isli.engine.keeper_client import KeeperClient
-    from isli.engine.react_loop import ReActLoop
-    from isli.memory.session import SessionManager
 
 log = logging.getLogger("isli.loop_engine")
 
@@ -312,10 +309,26 @@ def parse_loop_command(
                 rest = (before_until + " " + prompt_rest).strip()
             else:
                 # If no delimiter found, take first 2 words if condition looks like 'tests pass' or all as condition
-                if len(words) >= 3 and words[1].lower() in {"pass", "passes", "succeeds", "fails", "done", "clean", "ready"}:
+                if len(words) >= 3 and words[1].lower() in {
+                    "pass",
+                    "passes",
+                    "succeeds",
+                    "fails",
+                    "done",
+                    "clean",
+                    "ready",
+                }:
                     until_condition = " ".join(words[:2]).strip()
                     rest = (before_until + " " + " ".join(words[2:])).strip()
-                elif len(words) >= 4 and words[2].lower() in {"pass", "passes", "succeeds", "fails", "done", "clean", "ready"}:
+                elif len(words) >= 4 and words[2].lower() in {
+                    "pass",
+                    "passes",
+                    "succeeds",
+                    "fails",
+                    "done",
+                    "clean",
+                    "ready",
+                }:
                     until_condition = " ".join(words[:3]).strip()
                     rest = (before_until + " " + " ".join(words[3:])).strip()
                 else:
@@ -362,6 +375,7 @@ class LoopScheduler:
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._worker_thread: threading.Thread | None = None
+        self.active_iteration_cancel_event: threading.Event | None = None
 
         # Listeners / callbacks for UI notification
         self.on_iteration_start: Callable[[LoopTask, int], None] | None = None
@@ -373,9 +387,10 @@ class LoopScheduler:
     @property
     def is_active(self) -> bool:
         """True if a loop is currently active (running or waiting)."""
-        return (
-            self.active_task is not None
-            and self.active_task.status in (LoopStatus.RUNNING, LoopStatus.WAITING, LoopStatus.PAUSED)
+        return self.active_task is not None and self.active_task.status in (
+            LoopStatus.RUNNING,
+            LoopStatus.WAITING,
+            LoopStatus.PAUSED,
         )
 
     def start_loop(
@@ -492,7 +507,9 @@ class LoopScheduler:
                 lines.append(f"  |-- Stop Condition:    [yellow]{task.until_condition}[/yellow]")
 
             if task.status == LoopStatus.WAITING:
-                lines.append(f"  |-- Next Run:          [bold green]in {task.format_countdown()}[/bold green]")
+                lines.append(
+                    f"  |-- Next Run:          [bold green]in {task.format_countdown()}[/bold green]"
+                )
             elif task.status == LoopStatus.RUNNING:
                 lines.append("  |-- Next Run:          [bold yellow]executing now...[/bold yellow]")
 
@@ -513,9 +530,11 @@ class LoopScheduler:
     # -- Internal Loop Lifecycle --------------------------------------
 
     def _stop_background_worker(self) -> None:
-        """Signal worker thread to exit."""
+        """Signal worker thread to exit and cancel any in-flight iteration."""
         self._stop_event.set()
         self._pause_event.clear()
+        if self.active_iteration_cancel_event is not None:
+            self.active_iteration_cancel_event.set()
 
     def _loop_worker(
         self,
@@ -559,6 +578,7 @@ class LoopScheduler:
                 self.on_iteration_start(task, task.iteration)
 
             iteration_cancel_event = threading.Event()
+            self.active_iteration_cancel_event = iteration_cancel_event
 
             # Execute query through ReActLoop
             t0 = time.time()
@@ -567,6 +587,8 @@ class LoopScheduler:
             except Exception as e:
                 result_text = f"Error in loop iteration: {e}"
                 log.error(f"Loop iteration error: {e}", exc_info=True)
+            finally:
+                self.active_iteration_cancel_event = None
 
             elapsed = time.time() - t0
             task.last_run_time = time.time()
@@ -591,7 +613,9 @@ class LoopScheduler:
 
             # Keeper cadence optimization if dynamic interval is enabled
             if task.dynamic_interval:
-                task.interval_seconds = self._tune_cadence(task.interval_seconds, elapsed, result_text)
+                task.interval_seconds = self._tune_cadence(
+                    task.interval_seconds, elapsed, result_text
+                )
 
             # Schedule next run
             task.status = LoopStatus.WAITING
@@ -642,12 +666,17 @@ class LoopScheduler:
         Only applied after at least 1 iteration to allow initial run.
         """
         if task.iteration == 0:
-            task.last_probe_hash = hashlib.md5(self._get_workspace_probe_data().encode("utf-8")).hexdigest()
+            task.last_probe_hash = hashlib.md5(
+                self._get_workspace_probe_data().encode("utf-8")
+            ).hexdigest()
             return False, ""
 
         # If task explicitly asks for time-based monitoring or tests, don't blindly skip
         lower_prompt = task.prompt.lower()
-        if any(w in lower_prompt for w in ["test", "pytest", "build", "deploy", "server", "pr", "pull request", "check"]):
+        if any(
+            w in lower_prompt
+            for w in ["test", "pytest", "build", "deploy", "server", "pr", "pull request", "check"]
+        ):
             # For test/build tasks, we only skip if git was completely clean and no changes occurred
             # and Keeper confirms probe hash didn't change
             current_probe = self._get_workspace_probe_data()
@@ -672,26 +701,31 @@ class LoopScheduler:
         out_lower = output.lower()
 
         if "test" in cond_lower and ("pass" in cond_lower or "succeed" in cond_lower):
-            if "passed in" in out_lower or "all tests passed" in out_lower or "100% passed" in out_lower:
-                if "failed" not in out_lower and "error" not in out_lower:
-                    return True
-
-        if "clean" in cond_lower and "git" in cond_lower:
-            if "clean" in out_lower and "nothing to commit" in out_lower:
+            has_passed = (
+                "passed in" in out_lower
+                or "all tests passed" in out_lower
+                or "100% passed" in out_lower
+            )
+            if has_passed and "failed" not in out_lower and "error" not in out_lower:
                 return True
+
+        if (
+            "clean" in cond_lower
+            and "git" in cond_lower
+            and "clean" in out_lower
+            and "nothing to commit" in out_lower
+        ):
+            return True
 
         # 2. Keeper SLM verification
         if self.keeper and self.keeper.available:
             try:
-                return self.keeper.evaluate_loop_condition(condition, output)
+                return bool(self.keeper.evaluate_loop_condition(condition, output))
             except Exception as e:
                 log.warning(f"Keeper condition evaluation fallback: {e}")
 
         # 3. Textual presence check
-        if condition.lower() in output.lower():
-            return True
-
-        return False
+        return condition.lower() in output.lower()
 
     def _distill_iteration(self, iteration: int, prompt: str, result: str) -> str:
         """Produce a concise 1-2 line summary of iteration results."""

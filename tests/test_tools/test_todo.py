@@ -34,7 +34,9 @@ def test_todo_tool_actions():
     assert len(planner.get_tasks()) == 2
 
     # 2. update
-    out = tool.execute(action="update", task_id="1", status="in_progress", active_action="Inspecting")
+    out = tool.execute(
+        action="update", task_id="1", status="in_progress", active_action="Inspecting"
+    )
     assert "Updated task '1'" in out
     assert planner.get_task("1").status == "in_progress"
 

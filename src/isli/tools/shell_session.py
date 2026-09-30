@@ -190,7 +190,12 @@ class ShellSession:
             with contextlib.suppress(Exception):
                 stream.close()
 
-    def execute(self, command: str, timeout: int = 120) -> tuple[int, str, str]:
+    def execute(
+        self,
+        command: str,
+        timeout: int = 120,
+        cancel_event: Any | None = None,
+    ) -> tuple[int, str, str]:
         """Execute a command in the persistent shell.
 
         Returns (exit_code, stdout, stderr).
@@ -235,8 +240,21 @@ class ShellSession:
             except (BrokenPipeError, OSError) as e:
                 return (-1, "", f"Error: Shell stdin broken: {e}")
 
-            # Wait for marker with timeout
-            completed = self._marker_found.wait(timeout=timeout)
+            # Wait for marker with timeout and cancel_event polling
+            start_time = time.time()
+            completed = False
+            while True:
+                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                    self.terminate()
+                    return (-1, "", "Command aborted by user interruption.")
+
+                if self._marker_found.wait(timeout=0.1):
+                    completed = True
+                    break
+
+                if (time.time() - start_time) >= timeout:
+                    break
+
             self._current_marker = ""
 
             if not completed:

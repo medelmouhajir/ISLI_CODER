@@ -14,9 +14,7 @@ HTTP_FIXTURE = Path(__file__).parent / "fixtures" / "mcp_http_server.py"
 
 
 def _stdio_server(**kwargs) -> MCPServerConfig:
-    return MCPServerConfig(
-        name="echo", command=sys.executable, args=[str(STDIO_FIXTURE)], **kwargs
-    )
+    return MCPServerConfig(name="echo", command=sys.executable, args=[str(STDIO_FIXTURE)], **kwargs)
 
 
 # ---------------------------------------------------------------------- #
@@ -68,9 +66,7 @@ def test_stdio_call_timeout():
 
 
 def test_stdio_command_not_found():
-    client = MCPClient(
-        MCPServerConfig(name="bad", command="definitely-not-a-real-command-xyz")
-    )
+    client = MCPClient(MCPServerConfig(name="bad", command="definitely-not-a-real-command-xyz"))
     with pytest.raises(ConnectionError, match="not found"):
         client.connect()
 
@@ -107,9 +103,7 @@ def http_port() -> int:
 
 
 def _http_server(port: int) -> MCPServerConfig:
-    return MCPServerConfig(
-        name="http-echo", transport="http", url=f"http://127.0.0.1:{port}/mcp"
-    )
+    return MCPServerConfig(name="http-echo", transport="http", url=f"http://127.0.0.1:{port}/mcp")
 
 
 def test_http_connect_and_call(http_port: int):

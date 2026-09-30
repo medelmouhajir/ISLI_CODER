@@ -81,4 +81,3 @@ def test_render_user_message_and_streaming_renderer():
     assert "bash" in output2
     assert "completed" in output2
     assert "Done!" in output2
-

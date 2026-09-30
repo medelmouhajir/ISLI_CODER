@@ -180,12 +180,14 @@ class MCPManager:
         out = []
         for t in self._tools:
             if server_name is None or t._server_name == server_name:
-                out.append({
-                    "name": t.full_name,
-                    "server": t._server_name,
-                    "tool": t._tool_name,
-                    "description": t._description,
-                })
+                out.append(
+                    {
+                        "name": t.full_name,
+                        "server": t._server_name,
+                        "tool": t._tool_name,
+                        "description": t._description,
+                    }
+                )
         return out
 
     def get_resources(self, server_name: str | None = None) -> list[dict[str, Any]]:

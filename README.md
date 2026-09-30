@@ -1,5 +1,11 @@
 # ISLI (`isli`)
 
+[![CI](https://github.com/medelmouhajir/ISLI_CODER/actions/workflows/ci.yml/badge.svg)](https://github.com/medelmouhajir/ISLI_CODER/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Code Style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Type Checked: Mypy](https://img.shields.io/badge/type_checked-mypy-blue.svg)](https://mypy-lang.org/)
+
 Standalone AI coding CLI with a **dual-model architecture**:
 - **Cloud Reasoning Brain**: Any cloud model via LiteLLM (Claude 3.5/3.7 Sonnet, GPT-4o, Gemini 2.5, OpenRouter, Ollama).
 - **Embedded Local Keeper SLM**: Configurable small GGUF model (`smollm2-135m` default, `qwen3-0.6b`, `qwen2.5-coder-1.5b`) running via `llama-cpp-python` as an intelligence layer inside every tool with **GPU VRAM offloading by default**.
@@ -205,6 +211,20 @@ Run type checking:
 ```bash
 mypy src/
 ```
+
+---
+
+## Community & Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for local environment setup, architecture guidelines, and pull request procedures.
+
+For security concerns and vulnerability reporting, please review our [Security Policy](SECURITY.md).
+
+---
+
+## Author
+
+Created and maintained by [Mohamed Amin EL-MOUHAJIR](https://github.com/medelmouhajir) ([med.elmouhajir@gmail.com](mailto:med.elmouhajir@gmail.com)).
 
 ---
 

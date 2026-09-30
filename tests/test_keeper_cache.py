@@ -70,5 +70,5 @@ def test_cache_lru_eviction() -> None:
     cache.put(tool_name="read", content="C", output="outC")
 
     assert cache.get("read", "A") == "outA"  # A retained!
-    assert cache.get("read", "B") is None    # B evicted!
+    assert cache.get("read", "B") is None  # B evicted!
     assert cache.get("read", "C") == "outC"  # C present!

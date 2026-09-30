@@ -105,13 +105,15 @@ class EditTool(BaseTool):
         # Generate concise diff summary
         orig_lines = original_content.splitlines(keepends=True)
         new_lines = new_content.splitlines(keepends=True)
-        original_diff = list(difflib.unified_diff(
-            orig_lines,
-            new_lines,
-            fromfile=f"a/{rel_path}",
-            tofile=f"b/{rel_path}",
-            n=2,
-        ))
+        original_diff = list(
+            difflib.unified_diff(
+                orig_lines,
+                new_lines,
+                fromfile=f"a/{rel_path}",
+                tofile=f"b/{rel_path}",
+                n=2,
+            )
+        )
         if len(original_diff) > 60:
             diff = original_diff[:60] + [f"... ({len(original_diff)} lines total, truncated)"]
         else:

@@ -74,10 +74,7 @@ class ReadTool(BaseTool):
         end_idx = start_idx + line_count if line_count is not None else len(lines)
         selected_lines = lines[start_idx:end_idx]
 
-        formatted = [
-            f"{start_idx + i + 1:4d} | {line}"
-            for i, line in enumerate(selected_lines)
-        ]
+        formatted = [f"{start_idx + i + 1:4d} | {line}" for i, line in enumerate(selected_lines)]
         return "\n".join(formatted) if formatted else "(empty file)"
 
     def _deterministic_extract(

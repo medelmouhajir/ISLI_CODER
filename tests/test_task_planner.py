@@ -1,6 +1,7 @@
 """Tests for TaskPlanner and PlanTask model."""
 
 import pytest
+
 from isli.engine.task_planner import PlanTask, TaskPlanner
 
 

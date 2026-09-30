@@ -384,11 +384,10 @@ class KeeperClient:
     ) -> list[dict[str, Any]]:
         """Rank search results using the local SLM (returns JSON array of indices)."""
         items = "\n".join(
-            f"[{i}] {json.dumps(r, default=str)[:200]}"
-            for i, r in enumerate(results[:50])
+            f"[{i}] {json.dumps(r, default=str)[:200]}" for i, r in enumerate(results[:50])
         )
         prompt = (
-            f"Rank these search results by relevance to: \"{query}\"\n"
+            f'Rank these search results by relevance to: "{query}"\n'
             f"Return ONLY a JSON array of the top {top_k} indices.\n\n"
             f"Results:\n{items}"
         )
@@ -396,11 +395,7 @@ class KeeperClient:
         try:
             indices = json.loads(self._extract_json(result))
             if isinstance(indices, list):
-                return [
-                    results[i]
-                    for i in indices
-                    if isinstance(i, int) and i < len(results)
-                ]
+                return [results[i] for i in indices if isinstance(i, int) and i < len(results)]
         except (json.JSONDecodeError, ValueError, IndexError):
             pass
         return results[:top_k]

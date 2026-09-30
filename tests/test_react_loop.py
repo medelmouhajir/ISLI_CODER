@@ -157,11 +157,13 @@ def test_react_loop_permission_denial(mock_keeper, temp_project_dir):
     agent_mock.complete.side_effect = [
         AgentResponse(
             content="Writing file",
-            tool_calls=[{
-                "id": "call_w",
-                "name": "write",
-                "arguments": {"path": "danger.txt", "content": "bad"},
-            }],
+            tool_calls=[
+                {
+                    "id": "call_w",
+                    "name": "write",
+                    "arguments": {"path": "danger.txt", "content": "bad"},
+                }
+            ],
         ),
         AgentResponse(
             content="I understand you denied the write operation.",
@@ -324,7 +326,6 @@ def test_react_loop_dedupes_identical_tool_outputs(tool_engine, mock_keeper, tem
 
 
 def test_react_loop_todo_tool_syncs_plan_tasks(temp_project_dir):
-    from pathlib import Path
     from isli.engine.task_planner import TaskPlanner
     from isli.tools.todo import TodoTool
 
@@ -339,14 +340,16 @@ def test_react_loop_todo_tool_syncs_plan_tasks(temp_project_dir):
     agent_mock.complete.side_effect = [
         AgentResponse(
             content="Setting plan tasks",
-            tool_calls=[{
-                "id": "c_todo_1",
-                "name": "todo",
-                "arguments": {
-                    "action": "set",
-                    "tasks": [{"subject": "Write code", "status": "in_progress"}],
-                },
-            }],
+            tool_calls=[
+                {
+                    "id": "c_todo_1",
+                    "name": "todo",
+                    "arguments": {
+                        "action": "set",
+                        "tasks": [{"subject": "Write code", "status": "in_progress"}],
+                    },
+                }
+            ],
         ),
         AgentResponse(
             content="Plan tasks initialized successfully.",

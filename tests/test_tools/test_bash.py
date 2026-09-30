@@ -27,7 +27,7 @@ def test_bash_tool_keeper_summarization(temp_project_dir):
 
     tool = BashTool(keeper, temp_project_dir)
     # Generate 2400 characters of stdout to trigger summarization
-    res = tool.execute(command='python -c "print(\'long output test \' * 150)"')
+    res = tool.execute(command="python -c \"print('long output test ' * 150)\"")
 
     assert "[Keeper Output Summary" in res
     assert "Summary: 50 tests passed successfully." in res
@@ -38,12 +38,10 @@ def test_bash_tool_empty_summary_falls_back_to_raw(temp_project_dir):
     keeper = KeeperClient(config)
     keeper._loaded = True
     keeper._llm = MagicMock()
-    keeper._llm.create_chat_completion.return_value = {
-        "choices": [{"message": {"content": ""}}]
-    }
+    keeper._llm.create_chat_completion.return_value = {"choices": [{"message": {"content": ""}}]}
 
     tool = BashTool(keeper, temp_project_dir)
-    res = tool.execute(command='python -c "print(\'long output test \' * 150)"')
+    res = tool.execute(command="python -c \"print('long output test ' * 150)\"")
 
     assert "[Keeper Output Summary" not in res
     assert "long output test" in res
@@ -60,8 +58,8 @@ def test_bash_tool_nonzero_exit_appends_stderr_tail(temp_project_dir):
 
     tool = BashTool(keeper, temp_project_dir)
     res = tool.execute(
-        command='python -c "import sys; print(\'long output test \' * 150); '
-        'print(\'error detail \' * 50, file=sys.stderr); sys.exit(1)"'
+        command="python -c \"import sys; print('long output test ' * 150); "
+        "print('error detail ' * 50, file=sys.stderr); sys.exit(1)\""
     )
 
     assert "[Keeper Output Summary" in res
@@ -72,7 +70,7 @@ def test_bash_tool_nonzero_exit_appends_stderr_tail(temp_project_dir):
 
 def test_bash_tool_strips_ansi_codes(temp_project_dir, mock_keeper):
     tool = BashTool(mock_keeper, temp_project_dir)
-    res = tool.execute(command='python -c "print(\'\\x1b[31mred\\x1b[0m\')"')
+    res = tool.execute(command="python -c \"print('\\x1b[31mred\\x1b[0m')\"")
 
     assert "red" in res
     assert "\x1b[" not in res
@@ -82,7 +80,7 @@ def test_bash_tool_noninteractive_stdin(temp_project_dir, mock_keeper):
     """Commands that read from stdin receive EOF immediately and do not hang."""
     tool = BashTool(mock_keeper, temp_project_dir)
     res = tool.execute(
-        command='python -c "import sys; print(\'EOF_OK:\' + str(sys.stdin.read() == \'\'))"'
+        command="python -c \"import sys; print('EOF_OK:' + str(sys.stdin.read() == ''))\""
     )
     assert "EOF_OK:True" in res
     assert "(exit: 0)" in res
@@ -92,8 +90,8 @@ def test_bash_tool_environment_variables(temp_project_dir, mock_keeper):
     """Verify non-interactive environment variables are passed to subprocess."""
     tool = BashTool(mock_keeper, temp_project_dir)
     res = tool.execute(
-        command='python -c "import os; print(\'CI:\' + os.environ.get(\'CI\', \'\') '
-        '+ \'|NPM:\' + os.environ.get(\'npm_config_yes\', \'\'))"'
+        command="python -c \"import os; print('CI:' + os.environ.get('CI', '') "
+        "+ '|NPM:' + os.environ.get('npm_config_yes', ''))\""
     )
     assert "CI:1|NPM:true" in res
 
@@ -176,7 +174,7 @@ def test_bash_tool_code_view_bypasses_keeper(temp_project_dir, bash_config_onesh
     long_code = (
         "export default function Component() { return <div>Long Content Over Threshold</div>; }"
     )
-    res = tool.execute(command=f'python -c "print(\'{long_code}\')"')
+    res = tool.execute(command=f"python -c \"print('{long_code}')\"")
     # Normal command over threshold gets summarized
     assert "[Keeper Output Summary" in res
 
@@ -191,4 +189,3 @@ def test_bash_tool_code_view_bypasses_keeper(temp_project_dir, bash_config_onesh
     )
     assert "Keeper Output Summary" not in res_file
     assert long_code in res_file
-

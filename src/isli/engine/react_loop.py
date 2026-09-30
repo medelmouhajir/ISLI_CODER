@@ -25,9 +25,7 @@ from isli.utils.tokens import estimate_messages_tokens
 log = logging.getLogger("isli.loop")
 
 
-def _cancellable(
-    gen: Any, cancel_event: Any | None
-) -> Any:
+def _cancellable(gen: Any, cancel_event: Any | None) -> Any:
     """Yield chunks from a generator, stopping early when a cancel event is set.
 
     ``cancel_event`` is any object with an ``is_set()`` method (e.g.
@@ -104,6 +102,9 @@ class ReActLoop:
         context_block = self.context_manager.build_context(force_full=True)
 
         while turns < self.max_turns:
+            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                break
+
             turns += 1
 
             # Advance turn counter for decay and prompt optimization
@@ -133,9 +134,8 @@ class ReActLoop:
             # 3. Compact history if approaching token limit or on rolling turn intervals
             # Early micro-compaction prevents context ballooning up to 11k+ tokens
             compaction_threshold = min(6000, int(self.history_budget * 0.7))
-            should_compact = (
-                estimate_messages_tokens(messages) > compaction_threshold
-                or (turns > 1 and turns % 12 == 0 and len(history) > 8)
+            should_compact = estimate_messages_tokens(messages) > compaction_threshold or (
+                turns > 1 and turns % 12 == 0 and len(history) > 8
             )
             if should_compact:
                 messages = compact_history_smart(
@@ -150,15 +150,19 @@ class ReActLoop:
             # Pre-flight check: on simple greetings/conversational turns with no previous
             # history, bypass attaching 8 tool JSON schemas (~1,200 tokens)
             simple_greetings = {
-                "hi", "hello", "hey", "sup", "howdy", "good morning",
-                "good evening", "thanks", "thank you", "who are you",
+                "hi",
+                "hello",
+                "hey",
+                "sup",
+                "howdy",
+                "good morning",
+                "good evening",
+                "thanks",
+                "thank you",
+                "who are you",
             }
             normalized_query = user_input.strip().lower().rstrip("!?.")
-            is_greeting = (
-                turns == 1
-                and len(history) <= 1
-                and normalized_query in simple_greetings
-            )
+            is_greeting = turns == 1 and len(history) <= 1 and normalized_query in simple_greetings
 
             tool_definitions = None if is_greeting else self.tool_engine.get_definitions()
 
@@ -210,14 +214,16 @@ class ReActLoop:
                     t_name = t_name or tc["function"].get("name", "")
                     t_args = t_args or tc["function"].get("arguments", {})
                 args_str = json.dumps(t_args) if isinstance(t_args, dict) else str(t_args)
-                standardized_tool_calls.append({
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": t_name,
-                        "arguments": args_str,
-                    },
-                })
+                standardized_tool_calls.append(
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": t_name,
+                            "arguments": args_str,
+                        },
+                    }
+                )
 
             # 6. Record assistant action message
             self.session_manager.add_message(
@@ -228,6 +234,10 @@ class ReActLoop:
 
             # 7. Execute tool calls
             for tc in raw_tool_calls:
+                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                    log.info("Tool execution loop interrupted by cancel event")
+                    break
+
                 tool_name = tc.get("name", "")
                 args = tc.get("arguments", {})
                 if isinstance(tc.get("function"), dict):
@@ -285,9 +295,9 @@ class ReActLoop:
                     else:
                         if decision == "always":
                             self.permission_gate.grant_session(tool_name)
-                        res = self.tool_engine.execute(tool_name, args)
+                        res = self.tool_engine.execute(tool_name, args, cancel_event=cancel_event)
                 else:
-                    res = self.tool_engine.execute(tool_name, args)
+                    res = self.tool_engine.execute(tool_name, args, cancel_event=cancel_event)
 
                 # Track file modifications
                 if tool_name in {"edit", "write"} and res.success:
@@ -296,9 +306,12 @@ class ReActLoop:
                         self.context_manager.record_edit(file_path)
 
                 # Track plan task modifications
-                if tool_name == "todo" and res.success:
-                    if hasattr(self.session_manager, "sync_tasks"):
-                        self.session_manager.sync_tasks()
+                if (
+                    tool_name == "todo"
+                    and res.success
+                    and hasattr(self.session_manager, "sync_tasks")
+                ):
+                    self.session_manager.sync_tasks()
 
                 if on_tool_result:
                     on_tool_result(res)

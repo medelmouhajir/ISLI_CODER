@@ -124,9 +124,7 @@ def test_manager_disabled(tmp_path: Path, keeper: KeeperClient, tool_engine: Too
 
 def test_manager_add_and_remove_server(tmp_path: Path):
     manager = MCPManager(tmp_path, MCPBehaviorConfig())
-    path = manager.add_server(
-        MCPServerConfig(name="new", command="echo", args=["hi"])
-    )
+    path = manager.add_server(MCPServerConfig(name="new", command="echo", args=["hi"]))
     assert path == tmp_path / ".mcp.json"
     assert path.exists()
     data = json.loads(path.read_text(encoding="utf-8"))

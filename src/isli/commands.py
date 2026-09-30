@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING, Any
+
+from rich.console import Console
 
 if TYPE_CHECKING:
     from isli.config import Config
@@ -80,6 +83,7 @@ class CommandHandler:
         self.loop_scheduler = loop_scheduler
         self.react_loop = react_loop
         self.loop_runner: Any = None
+        self.console = Console()
 
     def handle(self, command_line: str) -> str | None:
         """
@@ -153,9 +157,7 @@ class CommandHandler:
                     else f"{m.context_length}"
                 )
                 price_str = f"${m.prompt_price:.2f} / ${m.completion_price:.2f}"
-                is_active = (
-                    " [green]<-- active[/green]" if m.id == self.agent.config.model else ""
-                )
+                is_active = " [green]<-- active[/green]" if m.id == self.agent.config.model else ""
                 lines.append(
                     f" {i:2d}. [yellow]{m.provider:10s}[/yellow] {m.id:44s}  "
                     f"{ctx_k:8s}  {price_str:16s}{is_active}"
@@ -206,9 +208,7 @@ class CommandHandler:
             from isli.memory.compaction import compact_history
 
             history = self.session_manager.get_history()
-            compacted = compact_history(
-                history, self.keeper, max_tokens=100, keep_recent=2
-            )
+            compacted = compact_history(history, self.keeper, max_tokens=100, keep_recent=2)
             self.session_manager.clear()
             for msg in compacted:
                 self.session_manager.add_message(
@@ -219,8 +219,7 @@ class CommandHandler:
                     msg.get("name"),
                 )
             return (
-                f"[green]History compacted from {len(history)} to "
-                f"{len(compacted)} entries.[/green]"
+                f"[green]History compacted from {len(history)} to {len(compacted)} entries.[/green]"
             )
 
         if cmd == "/memory":
@@ -264,9 +263,7 @@ class CommandHandler:
                         timeout=3,
                     )
                     changes = (
-                        len(s_proc.stdout.strip().splitlines())
-                        if s_proc.stdout.strip()
-                        else 0
+                        len(s_proc.stdout.strip().splitlines()) if s_proc.stdout.strip() else 0
                     )
                     git_dirty = f" ({changes} modified files)" if changes else " (clean)"
             except Exception:
@@ -403,9 +400,7 @@ class CommandHandler:
 
         if cmd == "/save":
             name = arg or None
-            new_id = self.session_manager.snapshot_session(
-                name=name, model=self.agent.config.model
-            )
+            new_id = self.session_manager.snapshot_session(name=name, model=self.agent.config.model)
             active_name = self.session_manager.active_session_name
             return (
                 f"[green]Saved session snapshot:[/green] "
@@ -450,6 +445,7 @@ class CommandHandler:
     def _handle_loop(self, arg: str) -> str:
         """Handle /loop command for session-level recurring tasks with Keeper SLM."""
         from pathlib import Path
+
         from isli.engine.loop_engine import parse_loop_command
 
         project_root = Path.cwd()
@@ -498,7 +494,10 @@ class CommandHandler:
             if self.loop_runner is not None:
                 run_fn = self.loop_runner
             elif self.react_loop is not None:
-                run_fn = lambda p, c: self.react_loop.run(p, cancel_event=c)
+                rl = self.react_loop
+
+                def run_fn(p: str, c: Any) -> Any:
+                    return rl.run(p, cancel_event=c)
             else:
                 return "[red]No execution loop runner available to execute /loop.[/red]"
 
@@ -545,7 +544,7 @@ class CommandHandler:
             if self.tool_engine:
                 bg_tool = self.tool_engine.get_tool("tasks")
                 if bg_tool:
-                    return bg_tool.execute(action="list")
+                    return str(bg_tool.execute(action="list"))
             return "[yellow]No background shell manager active.[/yellow]"
 
         # Default: list current plan tasks with rich formatting
@@ -574,7 +573,9 @@ class CommandHandler:
             else:
                 status_str = "[dim]○ pending   [/dim]"
 
-            action_note = f" [italic cyan]({task.active_action})[/italic cyan]" if task.active_action else ""
+            action_note = (
+                f" [italic cyan]({task.active_action})[/italic cyan]" if task.active_action else ""
+            )
             lines.append(f" {task.id:2s}  {status_str}  {task.subject}{action_note}")
 
         lines.append(
@@ -643,10 +644,7 @@ class CommandHandler:
             lines = ["[bold cyan]MCP Servers:[/bold cyan]"]
             for r in rows:
                 if r["status"] == "connected":
-                    status = (
-                        f"[green]connected[/green] ({r['transport']}, "
-                        f"{r['tools']} tools)"
-                    )
+                    status = f"[green]connected[/green] ({r['transport']}, {r['tools']} tools)"
                 else:
                     status = f"[red]failed[/red] — {r.get('error', 'unknown error')}"
                 lines.append(f"  * [bold white]{r['name']}[/bold white] — {status}")
@@ -676,11 +674,21 @@ class CommandHandler:
                 name = self.console.input("[bold]Server name:[/bold] ").strip()
                 if not name:
                     return "[yellow]Aborted: Server name is required.[/yellow]"
-                transport = self.console.input("[bold]Transport (stdio/http) [default: stdio]:[/bold] ").strip().lower() or "stdio"
+                transport = (
+                    self.console.input("[bold]Transport (stdio/http) [default: stdio]:[/bold] ")
+                    .strip()
+                    .lower()
+                    or "stdio"
+                )
                 if transport not in {"stdio", "http"}:
                     return f"[yellow]Invalid transport '{transport}'. Must be 'stdio' or 'http'.[/yellow]"
 
-                scope = self.console.input("[bold]Scope (project/user) [default: project]:[/bold] ").strip().lower() or "project"
+                scope = (
+                    self.console.input("[bold]Scope (project/user) [default: project]:[/bold] ")
+                    .strip()
+                    .lower()
+                    or "project"
+                )
                 if scope not in {"project", "user"}:
                     scope = "project"
 
@@ -690,12 +698,18 @@ class CommandHandler:
                         return "[yellow]Aborted: URL is required for HTTP transport.[/yellow]"
                     server = MCPServerConfig(name=name, transport="http", url=url)
                 else:
-                    command = self.console.input("[bold]Command (e.g. npx, uvx, python):[/bold] ").strip()
+                    command = self.console.input(
+                        "[bold]Command (e.g. npx, uvx, python):[/bold] "
+                    ).strip()
                     if not command:
                         return "[yellow]Aborted: Command is required for stdio transport.[/yellow]"
-                    raw_args = self.console.input("[bold]Arguments (space-separated, e.g. -y @modelcontextprotocol/server-sqlite ./db.sqlite):[/bold] ").strip()
+                    raw_args = self.console.input(
+                        "[bold]Arguments (space-separated, e.g. -y @modelcontextprotocol/server-sqlite ./db.sqlite):[/bold] "
+                    ).strip()
                     args = raw_args.split() if raw_args else []
-                    server = MCPServerConfig(name=name, transport="stdio", command=command, args=args)
+                    server = MCPServerConfig(
+                        name=name, transport="stdio", command=command, args=args
+                    )
 
                 path = self.mcp_manager.add_server(server, scope=scope)
                 self._mcp_reload()
@@ -819,10 +833,7 @@ class CommandHandler:
             return f"[red]MCP reload failed: {e}[/red]"
         rows = self.mcp_manager.status()
         ok = sum(1 for r in rows if r["status"] == "connected")
-        return (
-            f"[green]MCP servers reloaded:[/green] {ok} connected, "
-            f"{len(rows) - ok} failed."
-        )
+        return f"[green]MCP servers reloaded:[/green] {ok} connected, {len(rows) - ok} failed."
 
     def _mcp_tools(self, server_name: str | None) -> str:
         tools = self.mcp_manager.get_tools(server_name)
@@ -864,10 +875,10 @@ class CommandHandler:
             args = ", ".join(a.get("name", "") for a in p.get("arguments", []))
             arg_str = f"({args})" if args else "()"
             desc = f" — {p['description']}" if p.get("description") else ""
-            lines.append(f"  * [bold]{p['server']}:[/bold] [green]{p['name']}[/green]{arg_str}{desc}")
-        lines.append(
-            "\n[dim]Run a prompt: /mcp run-prompt <server> <name> [arg=value ...][/dim]"
-        )
+            lines.append(
+                f"  * [bold]{p['server']}:[/bold] [green]{p['name']}[/green]{arg_str}{desc}"
+            )
+        lines.append("\n[dim]Run a prompt: /mcp run-prompt <server> <name> [arg=value ...][/dim]")
         return "\n".join(lines)
 
     def _mcp_run_prompt(self, rest: list[str]) -> str:

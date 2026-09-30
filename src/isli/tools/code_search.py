@@ -65,7 +65,17 @@ class CodeSearchTool(BaseTool):
 
         # Non-Python extensions supported via regex
         REGEX_EXTENSIONS = {
-            ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".c", ".cpp", ".h", ".hpp", ".java"
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".rs",
+            ".go",
+            ".c",
+            ".cpp",
+            ".h",
+            ".hpp",
+            ".java",
         }
 
         # Discover code files
@@ -105,25 +115,29 @@ class CodeSearchTool(BaseTool):
                         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                             if sym_type in {"function", "any"} and query in node.name.lower():
                                 args = [a.arg for a in node.args.args]
-                                symbols.append({
-                                    "file": rel,
-                                    "line": node.lineno,
-                                    "kind": "function",
-                                    "name": node.name,
-                                    "signature": f"def {node.name}({', '.join(args)})",
-                                })
+                                symbols.append(
+                                    {
+                                        "file": rel,
+                                        "line": node.lineno,
+                                        "kind": "function",
+                                        "name": node.name,
+                                        "signature": f"def {node.name}({', '.join(args)})",
+                                    }
+                                )
                         elif (
                             isinstance(node, ast.ClassDef)
                             and sym_type in {"class", "any"}
                             and query in node.name.lower()
                         ):
-                            symbols.append({
-                                "file": rel,
-                                "line": node.lineno,
-                                "kind": "class",
-                                "name": node.name,
-                                "signature": f"class {node.name}",
-                            })
+                            symbols.append(
+                                {
+                                    "file": rel,
+                                    "line": node.lineno,
+                                    "kind": "class",
+                                    "name": node.name,
+                                    "signature": f"class {node.name}",
+                                }
+                            )
                 except Exception:
                     pass
             else:
@@ -133,24 +147,28 @@ class CodeSearchTool(BaseTool):
                     if fn_match and sym_type in {"function", "any"}:
                         name = fn_match.group(1)
                         if query in name.lower():
-                            symbols.append({
-                                "file": rel,
-                                "line": line_num,
-                                "kind": "function",
-                                "name": name,
-                                "signature": line.strip(),
-                            })
+                            symbols.append(
+                                {
+                                    "file": rel,
+                                    "line": line_num,
+                                    "kind": "function",
+                                    "name": name,
+                                    "signature": line.strip(),
+                                }
+                            )
                     class_match = CLASS_REGEX.match(line)
                     if class_match and sym_type in {"class", "any"}:
                         name = class_match.group(1)
                         if query in name.lower():
-                            symbols.append({
-                                "file": rel,
-                                "line": line_num,
-                                "kind": "class",
-                                "name": name,
-                                "signature": line.strip(),
-                            })
+                            symbols.append(
+                                {
+                                    "file": rel,
+                                    "line": line_num,
+                                    "kind": "class",
+                                    "name": name,
+                                    "signature": line.strip(),
+                                }
+                            )
 
             if len(symbols) >= 150:
                 break
@@ -163,8 +181,5 @@ class CodeSearchTool(BaseTool):
         else:
             final_symbols = symbols[:max_results]
 
-        lines = [
-            f"{s['file']}:{s['line']} [{s['kind']}] {s['signature']}"
-            for s in final_symbols
-        ]
+        lines = [f"{s['file']}:{s['line']} [{s['kind']}] {s['signature']}" for s in final_symbols]
         return "\n".join(lines)

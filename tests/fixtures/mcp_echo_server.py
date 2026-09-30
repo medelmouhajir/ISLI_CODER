@@ -54,9 +54,7 @@ def main() -> None:
                                 "description": "Echo a message back",
                                 "inputSchema": {
                                     "type": "object",
-                                    "properties": {
-                                        "message": {"type": "string"}
-                                    },
+                                    "properties": {"message": {"type": "string"}},
                                     "required": ["message"],
                                 },
                             },

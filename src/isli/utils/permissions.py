@@ -172,9 +172,8 @@ class PermissionGate:
         # Non-bash tool rules (wildcard tool/pattern matching)
         if self.rules:
             for rule in self.rules:
-                if (
-                    fnmatch.fnmatch(tool_name, rule.tool)
-                    and fnmatch.fnmatch(tool_name, rule.pattern)
+                if fnmatch.fnmatch(tool_name, rule.tool) and fnmatch.fnmatch(
+                    tool_name, rule.pattern
                 ):
                     if rule.action == RuleAction.ALLOW:
                         return False

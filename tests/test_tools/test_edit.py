@@ -43,14 +43,16 @@ def test_edit_tool_keeper_validation_failure(temp_project_dir):
     keeper._loaded = True
     keeper._llm = MagicMock()
     keeper._llm.create_chat_completion.return_value = {
-        "choices": [{
-            "message": {
-                "content": (
-                    '{"valid": false, "issues": ["Syntax error in replacement"], '
-                    '"suggestion": "Add missing parenthesis"}'
-                )
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        '{"valid": false, "issues": ["Syntax error in replacement"], '
+                        '"suggestion": "Add missing parenthesis"}'
+                    )
+                }
             }
-        }]
+        ]
     }
 
     file = temp_project_dir / "code.txt"

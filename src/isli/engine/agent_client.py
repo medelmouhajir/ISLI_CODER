@@ -67,9 +67,7 @@ class AgentClient:
         self.last_turn_completion_tokens = 0
         self.last_turn_cached_tokens = 0
 
-    def _prepare_messages_for_caching(
-        self, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def _prepare_messages_for_caching(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Inject cache breakpoints on system prompt and tool definitions for Anthropic models."""
         model_lower = self.config.model.lower()
         if "anthropic" not in model_lower and "claude" not in model_lower:
@@ -109,9 +107,7 @@ class AgentClient:
     ) -> AgentResponse:
         """Send completion request to the cloud LLM."""
         if litellm is None:
-            raise ImportError(
-                "litellm is required for AgentClient. Please install litellm."
-            )
+            raise ImportError("litellm is required for AgentClient. Please install litellm.")
 
         t0 = time.perf_counter()
         cached_messages = self._prepare_messages_for_caching(messages)
@@ -185,11 +181,13 @@ class AgentClient:
                 else:
                     parsed_args = args or {}
 
-                tool_calls.append({
-                    "id": getattr(tc, "id", f"call_{len(tool_calls)}"),
-                    "name": tc.function.name,
-                    "arguments": parsed_args,
-                })
+                tool_calls.append(
+                    {
+                        "id": getattr(tc, "id", f"call_{len(tool_calls)}"),
+                        "name": tc.function.name,
+                        "arguments": parsed_args,
+                    }
+                )
 
         return AgentResponse(
             content=choice.message.content or "",
@@ -207,9 +205,7 @@ class AgentClient:
     ) -> Generator[str | AgentResponse, None, None]:
         """Streaming completion — yields text delta tokens, then final AgentResponse."""
         if litellm is None:
-            raise ImportError(
-                "litellm is required for AgentClient. Please install litellm."
-            )
+            raise ImportError("litellm is required for AgentClient. Please install litellm.")
 
         t0 = time.perf_counter()
         cached_messages = self._prepare_messages_for_caching(messages)
@@ -318,9 +314,7 @@ class AgentClient:
         cost = None
         if last_chunk_with_usage:
             with contextlib.suppress(Exception):
-                cost = litellm.completion_cost(
-                    completion_response=last_chunk_with_usage
-                )
+                cost = litellm.completion_cost(completion_response=last_chunk_with_usage)
         if cost is None:
             with contextlib.suppress(Exception):
                 cost = litellm.completion_cost(
@@ -338,11 +332,13 @@ class AgentClient:
                     args = json.loads(tc["arguments"])
                 except json.JSONDecodeError:
                     args = {"raw": tc["arguments"]}
-                parsed_calls.append({
-                    "id": tc["id"] or f"call_{len(parsed_calls)}",
-                    "name": tc["name"],
-                    "arguments": args,
-                })
+                parsed_calls.append(
+                    {
+                        "id": tc["id"] or f"call_{len(parsed_calls)}",
+                        "name": tc["name"],
+                        "arguments": args,
+                    }
+                )
 
         yield AgentResponse(
             content=full_content,

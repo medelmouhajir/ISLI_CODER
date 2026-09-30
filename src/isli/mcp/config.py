@@ -74,6 +74,7 @@ def expand_env_vars(value: str) -> str:
 
     Raises ValueError if a required variable (no default) is unset.
     """
+
     def _replace(match: re.Match[str]) -> str:
         name, default = match.group(1), match.group(2)
         if name in os.environ:
@@ -99,13 +100,10 @@ def parse_server_config(name: str, raw: dict[str, Any]) -> MCPServerConfig:
 
     transport = str(raw.get("type", "stdio")).lower()
     if transport == "sse":
-        raise ValueError(
-            f"MCP server '{name}': SSE transport is deprecated. Use 'http' instead."
-        )
+        raise ValueError(f"MCP server '{name}': SSE transport is deprecated. Use 'http' instead.")
     if transport not in {"stdio", "http"}:
         raise ValueError(
-            f"MCP server '{name}': unknown transport '{transport}' "
-            f"(expected 'stdio' or 'http')."
+            f"MCP server '{name}': unknown transport '{transport}' (expected 'stdio' or 'http')."
         )
 
     if transport == "http":

@@ -7,8 +7,6 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from isli.commands import CommandHandler
 from isli.config import Config
 from isli.engine.loop_engine import (
@@ -100,7 +98,9 @@ class TestCommandParsing:
         assert task.raw_interval == "5m"
 
     def test_interval_and_prompt(self, tmp_path: Path) -> None:
-        action, task, _ = parse_loop_command("/loop 2m check PR status and review", project_root=tmp_path)
+        action, task, _ = parse_loop_command(
+            "/loop 2m check PR status and review", project_root=tmp_path
+        )
         assert action == "start"
         assert task is not None
         assert task.interval_seconds == 120.0
@@ -109,7 +109,9 @@ class TestCommandParsing:
         assert task.until_condition is None
 
     def test_every_syntax(self, tmp_path: Path) -> None:
-        action, task, _ = parse_loop_command("/loop every 15m inspect deployment", project_root=tmp_path)
+        action, task, _ = parse_loop_command(
+            "/loop every 15m inspect deployment", project_root=tmp_path
+        )
         assert action == "start"
         assert task is not None
         assert task.interval_seconds == 900.0

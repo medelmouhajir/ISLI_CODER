@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -98,6 +99,8 @@ def render_token_bar(
     session_manager: Any = None,
     mode: Mode = Mode.NORMAL,
     loop_scheduler: Any = None,
+    keeper: Any = None,
+    terminal_width: int = 120,
 ) -> str:
     """Render a status bar with workspace folder, model, mode, context %, and usage."""
     from isli.utils.tokens import estimate_messages_tokens
@@ -123,6 +126,15 @@ def render_token_bar(
     folder_name = project_root.name if project_root else Path.cwd().name
     model_name = agent.config.model.split("/")[-1]
 
+    # Keeper hardware acceleration badge
+    keeper_badge = ""
+    keeper_cfg = getattr(keeper, "config", None) if keeper is not None else None
+    if keeper_cfg and getattr(keeper_cfg, "enabled", False):
+        if getattr(keeper_cfg, "n_gpu_layers", 0) != 0:
+            keeper_badge = " [bold green][⚡VRAM][/bold green] [dim]|[/dim]"
+        else:
+            keeper_badge = " [dim][RAM] |[/dim]"
+
     tasks_badge = ""
     if session_manager and getattr(session_manager, "planner", None):
         tasks = session_manager.planner.get_tasks()
@@ -132,16 +144,28 @@ def render_token_bar(
             tasks_badge = f" [bold yellow][Tasks: {completed}/{total}][/bold yellow] [dim]|[/dim]"
 
     loop_badge = ""
-    if loop_scheduler and getattr(loop_scheduler, "is_active", False) and getattr(loop_scheduler, "active_task", None):
+    sched_active = loop_scheduler and getattr(loop_scheduler, "is_active", False)
+    if sched_active and getattr(loop_scheduler, "active_task", None):
         t = loop_scheduler.active_task
         rem = t.format_countdown()
-        loop_badge = f" [bold magenta][Loop: {t.raw_interval} #{t.iteration} ⏳{rem}][/bold magenta] [dim]|[/dim]"
+        loop_badge = (
+            f" [bold magenta][Loop: {t.raw_interval} #{t.iteration} ⏳{rem}][/bold magenta] "
+            f"[dim]|[/dim]"
+        )
 
     from rich.markup import escape
 
+    # Responsive compact layout on narrower terminals (< 105 cols)
+    if terminal_width < 105:
+        return (
+            f"[bold cyan]{escape(f'[{folder_name}]')}[/bold cyan] [dim]|[/dim] "
+            f"{mode_badge(mode)} [dim]|[/dim]{keeper_badge}{tasks_badge} "
+            f"[dim]Ctx:[/dim] [cyan]{pct}%[/cyan] [dim]| Cost: ${cost:.4f}[/dim]"
+        )
+
     return (
         f"[bold cyan]{escape(f'[{folder_name}]')}[/bold cyan] [dim]|[/dim] "
-        f"{mode_badge(mode)} [dim]|[/dim]{tasks_badge}{loop_badge} "
+        f"{mode_badge(mode)} [dim]|[/dim]{keeper_badge}{tasks_badge}{loop_badge} "
         f"[dim]{escape(model_name)} |[/dim] "
         f"[dim]Ctx:[/dim] [[cyan]{bar}[/cyan]] [dim]{pct}% "
         f"({active_tokens:,}/{budget:,}) | "
@@ -166,10 +190,10 @@ def render_mode_panel(mode: Mode) -> None:
 
 
 class SlashCommandCompleter(Completer):
-    """Provides autocomplete dropdown for slash commands with descriptions."""
+    """Provides autocomplete dropdown for slash commands, subcommands, and @file mentions."""
 
     COMMANDS: dict[str, str] = {
-        "/loop": "Run recurring prompt or workspace maintenance loop (syntax: /loop [int] [until: c] [p])",
+        "/loop": "Run recurring prompt or workspace loop (/loop [int] [until: c] [p])",
         "/model": "Switch cloud LLM model or view top 25 models",
         "/keeper": "Switch or inspect local Keeper model",
         "/cost": "Show cumulative token and USD cost expenditure",
@@ -192,24 +216,112 @@ class SlashCommandCompleter(Completer):
         "/exit": "Exit ISLI CLI",
     }
 
+    SUBCOMMANDS: dict[str, dict[str, str]] = {
+        "/tasks": {
+            "add": "Add a new plan task (e.g. /tasks add <description>)",
+            "done": "Mark a task as completed (e.g. /tasks done <id>)",
+            "clear": "Clear all plan tasks",
+            "bg": "List background shell tasks",
+        },
+        "/todo": {
+            "add": "Add a new plan task (e.g. /todo add <description>)",
+            "done": "Mark a task as completed (e.g. /todo done <id>)",
+            "clear": "Clear all plan tasks",
+            "bg": "List background shell tasks",
+        },
+        "/loop": {
+            "until:": "Run loop until condition is satisfied (e.g. /loop until: tests pass)",
+            "status": "Show active loop details and countdown",
+            "stop": "Stop active recurring loop",
+            "pause": "Pause active recurring loop",
+            "resume": "Resume paused recurring loop",
+        },
+        "/mcp": {
+            "list": "List configured MCP servers and status",
+            "reload": "Reload MCP servers and discover tools",
+            "tools": "List all registered MCP tools",
+            "add": "Add a new MCP server configuration",
+            "remove": "Remove an MCP server",
+        },
+        "/mode": {
+            "normal": "Manual approval for state-changing tools",
+            "plan": "Read-only planning mode",
+            "auto": "Keeper-classified tool approvals",
+            "robot": "Accept all actions without prompts",
+        },
+    }
+
+    def __init__(self, project_root: Path | None = None) -> None:
+        self.project_root = project_root or Path.cwd()
+
     def get_completions(self, document: Document, complete_event: Any) -> Iterable[Completion]:
         text = document.text_before_cursor
-        # Trigger autocomplete when typing slash commands
+        # 1. Trigger autocomplete when typing slash commands
         if text.startswith("/"):
-            word = text.strip()
-            matches = [
-                cmd for cmd in self.COMMANDS if cmd.lower().startswith(word.lower())
-            ]
-            # Exact match first, then shorter commands (so "/mode" completes to
-            # "/mode", not "/model")
-            matches.sort(key=lambda c: (c.lower() != word.lower(), len(c)))
-            for cmd in matches:
-                yield Completion(
-                    text=cmd,
-                    start_position=-len(word),
-                    display=cmd,
-                    display_meta=self.COMMANDS[cmd],
-                )
+            parts = text.split(maxsplit=1)
+            cmd = parts[0].lower()
+            if len(parts) == 1 and not text.endswith(" "):
+                # Autocomplete the main slash command
+                word = cmd
+                matches = [c for c in self.COMMANDS if c.lower().startswith(word)]
+                matches.sort(key=lambda c: (c.lower() != word, len(c)))
+                for c in matches:
+                    yield Completion(
+                        text=c,
+                        start_position=-len(word),
+                        display=c,
+                        display_meta=self.COMMANDS[c],
+                    )
+            elif cmd in self.SUBCOMMANDS:
+                # Autocomplete subcommands
+                sub_prefix = parts[1].strip() if len(parts) > 1 else ""
+                sub_dict = self.SUBCOMMANDS[cmd]
+                sub_matches = [s for s in sub_dict if s.lower().startswith(sub_prefix.lower())]
+                sub_matches.sort()
+                for s in sub_matches:
+                    yield Completion(
+                        text=s,
+                        start_position=-len(sub_prefix),
+                        display=s,
+                        display_meta=sub_dict[s],
+                    )
+            return
+
+        # 2. Trigger @file path completion
+        if "@" in text:
+            at_idx = text.rfind("@")
+            prefix = text[at_idx + 1 :]
+            if " " not in prefix:
+                try:
+                    search_dir = self.project_root
+                    p = Path(prefix)
+                    if p.parent != Path("."):
+                        target_dir = search_dir / p.parent
+                        name_prefix = p.name.lower()
+                    else:
+                        target_dir = search_dir
+                        name_prefix = prefix.lower()
+
+                    if target_dir.is_dir():
+                        count = 0
+                        for item in target_dir.iterdir():
+                            if item.name.startswith(".") or item.name == "__pycache__":
+                                continue
+                            if item.name.lower().startswith(name_prefix):
+                                rel = item.relative_to(self.project_root).as_posix()
+                                if item.is_dir():
+                                    rel += "/"
+                                yield Completion(
+                                    text=rel,
+                                    start_position=-len(prefix),
+                                    display=f"@{rel}",
+                                    display_meta="file" if item.is_file() else "dir",
+                                )
+                                count += 1
+                                if count >= 15:
+                                    break
+                except Exception:
+                    pass
 
 
 def is_interactive_tty() -> bool:
@@ -263,13 +375,51 @@ def permission_menu_tokens(
         ("deny", "[No] Deny execution"),
         ("always", "[Always] Always allow this tool for this session"),
     ]
-    tokens: StyleAndTextTuples = [
-        ("class:header", f"\n⚡ {tool_name}"),
-        ("class:title", " requested with arguments:\n"),
-    ]
-    for k, v in args.items():
-        tokens.append(("class:arg_key", f"   {k}: "))
-        tokens.append(("class:arg_val", f"{str(v)[:120]}\n"))
+
+    # Specialized diff preview for code edits
+    if tool_name == "edit" and "target" in args and "replacement" in args:
+        path = args.get("path", "file")
+        target_lines = str(args.get("target", "")).splitlines(keepends=True)
+        repl_lines = str(args.get("replacement", "")).splitlines(keepends=True)
+        diff = list(
+            difflib.unified_diff(
+                target_lines, repl_lines, fromfile=f"a/{path}", tofile=f"b/{path}", n=2
+            )
+        )
+        tokens: StyleAndTextTuples = [
+            ("class:header", f"\n⚡ edit requested for {path}:\n"),
+        ]
+        if diff:
+            for line in diff[2:10]:
+                if line.startswith("+"):
+                    tokens.append(("class:diff_add", f"   {line.rstrip()}\n"))
+                elif line.startswith("-"):
+                    tokens.append(("class:diff_del", f"   {line.rstrip()}\n"))
+                else:
+                    tokens.append(("class:diff_ctx", f"   {line.rstrip()}\n"))
+            if len(diff) > 10:
+                tokens.append(("class:help", f"   ... ({len(diff) - 10} more diff lines)\n"))
+        else:
+            tokens.append(("class:arg_val", "   Replacement identical to target.\n"))
+    elif tool_name == "write" and "path" in args:
+        path = args.get("path", "file")
+        content = str(args.get("content", ""))
+        tokens = [
+            ("class:header", f"\n⚡ write requested for {path}:\n"),
+        ]
+        lines = content.splitlines()
+        for line in lines[:6]:
+            tokens.append(("class:diff_add", f"   + {line[:90]}\n"))
+        if len(lines) > 6:
+            tokens.append(("class:help", f"   ... ({len(lines) - 6} more lines)\n"))
+    else:
+        tokens = [
+            ("class:header", f"\n⚡ {tool_name}"),
+            ("class:title", " requested with arguments:\n"),
+        ]
+        for k, v in args.items():
+            tokens.append(("class:arg_key", f"   {k}: "))
+            tokens.append(("class:arg_val", f"{str(v)[:120]}\n"))
 
     if mode == Mode.AUTO:
         tokens.append(
@@ -316,9 +466,7 @@ def mode_menu_tokens(
             tokens.append(("class:pointer", "   "))
             tokens.append(("class:option", f"{marker} {info.label}"))
             tokens.append(("class:option_desc", f" — {info.short_desc}\n"))
-    tokens.append(
-        ("class:help", " (Use ↑/↓ arrows to navigate, Enter to choose, Esc to cancel)\n")
-    )
+    tokens.append(("class:help", " (Use ↑/↓ arrows to navigate, Enter to choose, Esc to cancel)\n"))
     return tokens
 
 
@@ -393,17 +541,23 @@ def select_permission_interactive(
     def get_text() -> StyleAndTextTuples:
         return permission_menu_tokens(tool_name, args, selected_idx, mode)
 
-    style = Style.from_dict({
-        "header": "bold yellow",
-        "title": "bold cyan",
-        "arg_key": "cyan",
-        "arg_val": "white",
-        "auto_note": "yellow italic",
-        "pointer": "bold green",
-        "selected": "bold green",
-        "option": "white",
-        "help": "gray italic",
-    })
+    style = Style.from_dict(
+        {
+            "header": "bold yellow",
+            "title": "bold cyan",
+            "arg_key": "cyan",
+            "arg_val": "white",
+            "auto_note": "yellow italic",
+            "pointer": "bold green",
+            "selected": "bold green",
+            "option": "white",
+            "help": "gray italic",
+            "diff_add": "bold green",
+            "diff_del": "bold red",
+            "diff_ctx": "gray",
+            "diff_header": "bold cyan",
+        }
+    )
 
     try:
         layout = Layout(HSplit([Window(FormattedTextControl(get_text))]))
@@ -468,15 +622,17 @@ def select_mode_interactive(current_mode: Mode) -> Mode | None:
     def get_text() -> StyleAndTextTuples:
         return mode_menu_tokens(modes, current_mode, selected_idx)
 
-    style = Style.from_dict({
-        "title": "bold cyan",
-        "pointer": "bold green",
-        "selected": "bold green",
-        "selected_desc": "green",
-        "option": "white",
-        "option_desc": "gray",
-        "help": "gray italic",
-    })
+    style = Style.from_dict(
+        {
+            "title": "bold cyan",
+            "pointer": "bold green",
+            "selected": "bold green",
+            "selected_desc": "green",
+            "option": "white",
+            "option_desc": "gray",
+            "help": "gray italic",
+        }
+    )
 
     try:
         layout = Layout(HSplit([Window(FormattedTextControl(get_text))]))
@@ -508,16 +664,10 @@ def _fallback_permission(
     try:
         if fallback_input_fn:
             choice = (
-                fallback_input_fn("[bold]Allow? [y]es / [n]o / [a]lways ▸ [/bold]")
-                .strip()
-                .lower()
+                fallback_input_fn("[bold]Allow? [y]es / [n]o / [a]lways ▸ [/bold]").strip().lower()
             )
         else:
-            choice = (
-                console.input("[bold]Allow? [y]es / [n]o / [a]lways ▸ [/bold]")
-                .strip()
-                .lower()
-            )
+            choice = console.input("[bold]Allow? [y]es / [n]o / [a]lways ▸ [/bold]").strip().lower()
 
         if choice in {"a", "always"}:
             return "always"
@@ -607,9 +757,7 @@ class StreamingResponseRenderer:
             getattr(res, "success", True) if not isinstance(res, dict) else res.get("success", True)
         )
         status = (
-            "[bold green]✓ completed[/bold green]"
-            if success
-            else "[bold red]✗ failed[/bold red]"
+            "[bold green]✓ completed[/bold green]" if success else "[bold red]✗ failed[/bold red]"
         )
         self.console.print(f"  [cyan]└─[/cyan] {status}\n")
 
@@ -634,4 +782,3 @@ class StreamingResponseRenderer:
             padding=(0, 2),
             safe_box=True,
         )
-

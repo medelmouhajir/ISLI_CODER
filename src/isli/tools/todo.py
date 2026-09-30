@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from isli.engine.task_planner import TaskPlanner, TaskStatus
+from isli.engine.task_planner import TaskPlanner
 from isli.tools.base import BaseTool, ToolSchema
 
 if TYPE_CHECKING:
     from pathlib import Path
+
     from isli.engine.keeper_client import KeeperClient
 
 
@@ -53,7 +54,10 @@ class TodoTool(BaseTool):
                             "type": "object",
                             "properties": {
                                 "id": {"type": "string", "description": "Optional custom task ID"},
-                                "subject": {"type": "string", "description": "Clear description of step"},
+                                "subject": {
+                                    "type": "string",
+                                    "description": "Clear description of step",
+                                },
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed", "failed"],

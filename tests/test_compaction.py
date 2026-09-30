@@ -57,11 +57,13 @@ def test_compact_history_offline_fallback():
     messages = [{"role": "system", "content": "System prompt"}]
     for i in range(10):
         messages.append({"role": "user", "content": f"edit file_{i}.py with feature {i}"})
-        messages.append({
-            "role": "assistant",
-            "content": f"done editing file_{i}.py",
-            "tool_calls": [{"id": f"c_{i}", "function": {"name": "edit"}}],
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": f"done editing file_{i}.py",
+                "tool_calls": [{"id": f"c_{i}", "function": {"name": "edit"}}],
+            }
+        )
 
     compacted = compact_history(messages, keeper, max_tokens=50, keep_recent=4)
     assert len(compacted) < len(messages)

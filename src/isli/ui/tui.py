@@ -21,6 +21,7 @@ interface stays responsive while tokens stream.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import queue
 import threading
 from collections.abc import Callable
@@ -31,7 +32,6 @@ from typing import Any
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples, fragment_list_to_text
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
@@ -72,13 +72,16 @@ class Block:
     content: str = ""
     meta: str = ""
     status: str = ""
+    output: str = ""
+    diff: str = ""
+    expanded: bool = False
 
 
 def _block_renderable(block: Block) -> Any:
     """Return the rich renderable (or markup string) for a conversation block."""
-    if block.kind == "user":
-        from rich.markup import escape
+    from rich.markup import escape
 
+    if block.kind == "user":
         return Panel(
             f"[bold white]{escape(block.content)}[/bold white]",
             title="[bold dodger_blue1]● You[/bold dodger_blue1]",
@@ -101,12 +104,36 @@ def _block_renderable(block: Block) -> Any:
         icon = "📋" if block.meta == "todo" else "⚙"
         return f"  [cyan]┌─ {icon} {block.meta}[/cyan] [dim]({block.content})[/dim]"
     if block.kind == "tool_result":
-        status = (
-            "[bold green]✓ completed[/bold green]"
-            if block.status == "success"
-            else "[bold red]✗ failed[/bold red]"
-        )
-        return f"  [cyan]└─[/cyan] {status}"
+        if block.status == "error":
+            err_msg = block.output.strip() or "Tool execution failed"
+            return (
+                f"  [bold red]└─ ✗ failed[/bold red]\n"
+                f"     [bold red]Error:[/bold red] [dim red]{escape(err_msg[:400])}[/dim red]"
+            )
+        status = "[bold green]✓ completed[/bold green]"
+        lines = [f"  [cyan]└─[/cyan] {status}"]
+        if block.diff:
+            diff_lines = block.diff.strip().splitlines()
+            for dl in diff_lines[:15]:
+                if dl.startswith("+") and not dl.startswith("+++"):
+                    lines.append(f"     [green]{escape(dl[:120])}[/green]")
+                elif dl.startswith("-") and not dl.startswith("---"):
+                    lines.append(f"     [red]{escape(dl[:120])}[/red]")
+                elif dl.startswith("@@"):
+                    lines.append(f"     [cyan]{escape(dl[:120])}[/cyan]")
+                else:
+                    lines.append(f"     [dim]{escape(dl[:120])}[/dim]")
+            if len(diff_lines) > 15:
+                lines.append(f"     [dim]└─ ... (+{len(diff_lines) - 15} more diff lines)[/dim]")
+        elif block.output:
+            raw_lines = [line for line in block.output.strip().splitlines() if line.strip()]
+            if raw_lines:
+                preview = raw_lines[:3]
+                for pl in preview:
+                    lines.append(f"     [dim]│ {escape(pl[:100])}[/dim]")
+                if len(raw_lines) > 3:
+                    lines.append(f"     [dim]└─ ... (+{len(raw_lines) - 3} lines)[/dim]")
+        return "\n".join(lines)
     return block.content
 
 
@@ -122,10 +149,14 @@ class ConversationView:
         self.blocks: list[Block] = []
         self.scroll_offset = 0
         self.auto_scroll = True
+        self.user_scrolled = False
         self._version = 0
         self._cached_text = ""
         self._cached_width = 0
         self._cached_version = -1
+        # Two-tier caching: cache rendered ANSI text of finalized blocks (0 .. N-2)
+        self._finalized_rendered = ""
+        self._finalized_count = 0
         self._console = Console(
             force_terminal=True, file=StringIO(), color_system="256", highlight=False
         )
@@ -145,16 +176,24 @@ class ConversationView:
         if not self.blocks:
             return None
         self._version += 1
+        self._invalidate_finalized_cache()
         return self.blocks.pop()
 
     def clear(self) -> None:
         self.blocks.clear()
         self.scroll_offset = 0
         self.auto_scroll = True
+        self.user_scrolled = False
         self._version += 1
+        self._invalidate_finalized_cache()
+
+    def _invalidate_finalized_cache(self) -> None:
+        self._finalized_rendered = ""
+        self._finalized_count = 0
 
     # -- scrolling ----------------------------------------------------
     def scroll_up(self, lines: int = 3) -> None:
+        self.user_scrolled = True
         self.auto_scroll = False
         self.scroll_offset = max(0, self.scroll_offset - lines)
 
@@ -162,7 +201,13 @@ class ConversationView:
         self.scroll_offset += lines
         self._clamp_to_bottom()
 
+    def scroll_to_top(self) -> None:
+        self.user_scrolled = True
+        self.auto_scroll = False
+        self.scroll_offset = 0
+
     def scroll_to_bottom(self) -> None:
+        self.user_scrolled = False
         self.auto_scroll = True
         self._clamp_to_bottom()
 
@@ -171,7 +216,8 @@ class ConversationView:
         height = self._last_height()
         if self.scroll_offset + height >= total:
             self.scroll_offset = max(0, total - height)
-            self.auto_scroll = True
+            if not self.user_scrolled:
+                self.auto_scroll = True
 
     # -- rendering ----------------------------------------------------
     def _line_count(self) -> int:
@@ -190,11 +236,41 @@ class ConversationView:
     def _render_text(self, width: int) -> str:
         if self._cached_version == self._version and self._cached_width == width:
             return self._cached_text
+        if width != self._cached_width:
+            self._invalidate_finalized_cache()
+
+        if not self.blocks:
+            self._cached_text = ""
+            self._cached_version = self._version
+            self._cached_width = width
+            return ""
+
         self._console.width = width
-        self._console.begin_capture()
-        for block in self.blocks:
-            self._console.print(_block_renderable(block))
-        self._cached_text = self._console.end_capture()
+
+        # Two-tier caching optimization:
+        # If there are multiple blocks, finalize blocks 0 to N-2
+        if len(self.blocks) > 1:
+            target_finalized = len(self.blocks) - 1
+            if self._finalized_count < target_finalized:
+                self._console.begin_capture()
+                for i in range(self._finalized_count, target_finalized):
+                    self._console.print(_block_renderable(self.blocks[i]))
+                chunk = self._console.end_capture()
+                self._finalized_rendered += chunk
+                self._finalized_count = target_finalized
+
+            # Render only the active last block
+            self._console.begin_capture()
+            self._console.print(_block_renderable(self.blocks[-1]))
+            active_chunk = self._console.end_capture()
+            self._cached_text = self._finalized_rendered + active_chunk
+        else:
+            self._console.begin_capture()
+            self._console.print(_block_renderable(self.blocks[0]))
+            self._cached_text = self._console.end_capture()
+            self._finalized_rendered = ""
+            self._finalized_count = 0
+
         self._cached_version = self._version
         self._cached_width = width
         return self._cached_text
@@ -205,7 +281,7 @@ class ConversationView:
         text = self._render_text(self._last_width())
         lines = text.split("\n")
         total = len(lines)
-        if self.auto_scroll or self.scroll_offset + height >= total:
+        if not self.user_scrolled:
             self.scroll_offset = max(0, total - height)
         start = min(self.scroll_offset, max(0, total - 1))
         return "\n".join(lines[start : start + height])
@@ -256,18 +332,21 @@ class IsliTui:
 
         self.streaming = False
         self.cancel_event = threading.Event()
+        self._active_cancel_event: threading.Event | None = None
+        self._pending_prompts: list[str] = []
         self._ui_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._spinner_idx = 0
         self._markup_console = Console(
             force_terminal=True, file=StringIO(), color_system="256", highlight=False
         )
 
-        # Modal state (permission / mode menus).
+        # Modal state (permission / mode / model menus).
         self._modal_float: Float | None = None
         self._modal_control: FormattedTextControl | None = None
         self._modal_kind: str | None = None
         self._modal_selected = 0
         self._modal_options: list[Any] = []
+        self._modal_models: list[Any] = []
         self._modal_tool_name = ""
         self._modal_args: dict[str, Any] = {}
         self._modal_mode: Mode | None = None
@@ -276,6 +355,7 @@ class IsliTui:
         self._modal_result: dict[str, Any] | None = None
         self._modal_done: threading.Event | None = None
         self._modal_on_choose: Callable[[Any], None] | None = None
+        self._last_ctrl_c: float = 0.0
 
         self._build_input()
         self._build_modal()
@@ -283,8 +363,8 @@ class IsliTui:
         self._build_layout()
         self._build_style()
 
-        if getattr(self.commands, "loop_scheduler", None):
-            sched = self.commands.loop_scheduler
+        sched = getattr(self.commands, "loop_scheduler", None)
+        if sched is not None:
             sched.on_iteration_start = self._on_loop_iteration_start
             sched.on_iteration_end = self._on_loop_iteration_end
             sched.on_skip = self._on_loop_skip
@@ -299,11 +379,10 @@ class IsliTui:
         history_file.parent.mkdir(parents=True, exist_ok=True)
         self.input_buffer = Buffer(
             multiline=True,
-            completer=SlashCommandCompleter(),
+            completer=SlashCommandCompleter(project_root=self.project_root),
             history=FileHistory(str(history_file)),
             complete_while_typing=True,
             accept_handler=self._on_submit,
-            read_only=Condition(lambda: self.streaming),
         )
         self.input_control = BufferControl(
             buffer=self.input_buffer,
@@ -375,30 +454,67 @@ class IsliTui:
         def _newline(event: Any) -> None:
             event.current_buffer.insert_text("\n")
 
+        @kb.add("escape", "enter")
+        def _alt_newline(event: Any) -> None:
+            event.current_buffer.insert_text("\n")
+
         @kb.add("c-c")
         def _ctrl_c(event: Any) -> None:
+            canceled_active = False
             if self.streaming:
                 self.cancel_event.set()
-            elif (
-                getattr(self.commands, "loop_scheduler", None)
-                and self.commands.loop_scheduler.is_active
-            ):
-                msg = self.commands.loop_scheduler.stop_loop()
+                if self._active_cancel_event is not None:
+                    self._active_cancel_event.set()
+                canceled_active = True
+
+            sched = getattr(self.commands, "loop_scheduler", None)
+            if sched is not None and sched.is_active:
+                msg = sched.stop_loop()
                 self.view.add(Block("system", msg))
+                canceled_active = True
+
+            if canceled_active:
+                if self._pending_prompts:
+                    self._pending_prompts.clear()
+                    self.view.add(Block("system", "[dim]Cleared queued prompt(s).[/dim]"))
                 self._invalidate()
-            elif self.app is not None:
-                self.app.exit()
+            elif self.input_buffer.text.strip():
+                self.input_buffer.text = ""
+                self.view.add(Block("system", "[dim]Input cleared.[/dim]"))
+                self._invalidate()
+            else:
+                import time
+
+                now = time.time()
+                if now - self._last_ctrl_c < 1.5:
+                    if self.app is not None:
+                        self.app.exit()
+                else:
+                    self._last_ctrl_c = now
+                    self.view.add(
+                        Block("system", "[dim]Press Ctrl+C again or type /exit to quit.[/dim]")
+                    )
+                    self._invalidate()
 
         @kb.add("escape")
         def _escape(event: Any) -> None:
+            canceled_active = False
             if self.streaming:
                 self.cancel_event.set()
-            elif (
-                getattr(self.commands, "loop_scheduler", None)
-                and self.commands.loop_scheduler.is_active
-            ):
-                msg = self.commands.loop_scheduler.stop_loop()
+                if self._active_cancel_event is not None:
+                    self._active_cancel_event.set()
+                canceled_active = True
+
+            sched = getattr(self.commands, "loop_scheduler", None)
+            if sched is not None and sched.is_active:
+                msg = sched.stop_loop()
                 self.view.add(Block("system", msg))
+                canceled_active = True
+
+            if canceled_active:
+                if self._pending_prompts:
+                    self._pending_prompts.clear()
+                    self.view.add(Block("system", "[dim]Cleared queued prompt(s).[/dim]"))
                 self._invalidate()
 
         @kb.add("s-tab")
@@ -416,6 +532,10 @@ class IsliTui:
         def _mode_menu(event: Any) -> None:
             self._open_mode_modal()
 
+        @kb.add("c-x", "o")
+        def _model_menu(event: Any) -> None:
+            self._open_model_modal()
+
         @kb.add("pageup")
         def _page_up(event: Any) -> None:
             self.view.scroll_up(10)
@@ -426,18 +546,35 @@ class IsliTui:
             self.view.scroll_down(10)
             self._invalidate()
 
+        @kb.add("home")
+        def _home(event: Any) -> None:
+            self.view.scroll_to_top()
+            self._invalidate()
+
+        @kb.add("end")
+        def _end(event: Any) -> None:
+            self.view.scroll_to_bottom()
+            self._invalidate()
+
         self.kb = kb
 
     def _build_layout(self) -> None:
         self.status_control = FormattedTextControl(self._status_text)
         self.help_control = FormattedTextControl(self._help_text)
+        self.task_banner_control = FormattedTextControl(self._task_banner_text)
         self.status_window = Window(self.status_control, height=1)
+        self.task_banner_window = Window(
+            self.task_banner_control,
+            height=self._task_banner_window_height,
+            style="class:task_banner",
+        )
         self.help_window = Window(self.help_control, height=1, style="class:helpbar")
         self.float_container = FloatContainer(
             content=HSplit(
                 [
                     self.status_window,
                     self.conversation_window,
+                    self.task_banner_window,
                     self.input_window,
                     self.help_window,
                 ]
@@ -467,6 +604,11 @@ class IsliTui:
                 "selected": "bold green",
                 "option": "white",
                 "help": "gray italic",
+                "diff_add": "bold green",
+                "diff_del": "bold red",
+                "diff_ctx": "gray",
+                "diff_header": "bold cyan",
+                "task_banner": "bg:#1e1e2e",
             }
         )
 
@@ -521,6 +663,8 @@ class IsliTui:
             self.session_mgr,
             self.loop.permission_gate.mode,
             loop_scheduler=getattr(self.commands, "loop_scheduler", None),
+            keeper=getattr(self.loop, "keeper", None),
+            terminal_width=self._status_width(),
         )
         if self.streaming:
             frame = SPINNER_FRAMES[self._spinner_idx % len(SPINNER_FRAMES)]
@@ -540,10 +684,54 @@ class IsliTui:
         return console.end_capture()
 
     def _help_text(self) -> str:
+        scroll_indicator = ""
+        if self.view.user_scrolled:
+            scroll_indicator = "[bold yellow][Scrolled Up · End to snap][/bold yellow] · "
+        queue_indicator = ""
+        if self._pending_prompts:
+            queue_indicator = (
+                f"[bold green][Queued: {len(self._pending_prompts)} prompt(s)][/bold green] · "
+            )
+        interrupt_hint = "Esc interrupt" if self.streaming else "Esc/Ctrl+C interrupt"
         return (
-            " Enter submit · Ctrl+J newline · ↑/↓ history · Shift+Tab mode · "
-            "Ctrl+X M mode menu · Esc interrupt · /help"
+            f" {scroll_indicator}{queue_indicator}"
+            f"Enter submit/queue · Alt+Enter newline · Shift+Tab mode · "
+            f"Ctrl+X M mode · Ctrl+X O model · {interrupt_hint} · /help"
         )
+
+    # -- task banner --------------------------------------------------
+    def _task_banner_height(self) -> int:
+        return 1 if self._get_active_task_info() is not None else 0
+
+    def _task_banner_window_height(self) -> Dimension:
+        return Dimension.exact(self._task_banner_height())
+
+    def _get_active_task_info(self) -> tuple[str, str, str, int, int] | None:
+        """Return (id, subject, active_action, done_count, total_count) if task is in progress."""
+        if not hasattr(self.session_mgr, "planner") or not self.session_mgr.planner:
+            return None
+        tasks = self.session_mgr.planner.get_tasks()
+        if not tasks:
+            return None
+        active = self.session_mgr.planner.get_active_task()
+        if not active:
+            return None
+        done = sum(1 for t in tasks if t.status == "completed")
+        return (active.id, active.subject, active.active_action or "", done, len(tasks))
+
+    def _task_banner_text(self) -> Any:
+        info = self._get_active_task_info()
+        if not info:
+            return []
+        from rich.markup import escape
+
+        tid, subj, act, done, total = info
+        act_str = f" [dim italic]({escape(act)})[/dim italic]" if act else ""
+        markup = (
+            f" [bold yellow]► Task [{tid}/{total}][/bold yellow] "
+            f"[bold white]{escape(subj)}[/bold white]{act_str}"
+        )
+        return ANSI(self._render_markup(markup, self._status_width()))
 
     # -- input --------------------------------------------------------
     def _get_line_prefix(self, line_number: int, wrap_count: int) -> StyleAndTextTuples:
@@ -563,11 +751,30 @@ class IsliTui:
 
     def _on_submit(self, buffer: Buffer) -> bool:
         text = buffer.text.strip()
-        if not text or self.streaming:
+        if not text:
             return False
+
+        # If user submits a slash command
         if text.startswith("/"):
+            # Special check: /loop stop, /exit, /status can be run even during streaming
             self._handle_slash(text)
             return False
+
+        # If currently streaming, queue the prompt instead of rejecting
+        if self.streaming:
+            self._pending_prompts.append(text)
+            preview = text[:80] + ("..." if len(text) > 80 else "")
+            hint = "(will run when current turn completes; press Esc to interrupt now)"
+            self.view.add(
+                Block(
+                    "system",
+                    f"[bold yellow]● Queued prompt (#{len(self._pending_prompts)}):[/bold yellow] "
+                    f"[dim]{preview} {hint}[/dim]",
+                )
+            )
+            self._invalidate()
+            return False
+
         self._start_agent(text)
         return False
 
@@ -581,11 +788,31 @@ class IsliTui:
             self._invalidate()
             return
         if cmd == "/exit":
+            if self.streaming:
+                self.cancel_event.set()
+                if self._active_cancel_event is not None:
+                    self._active_cancel_event.set()
+            sched = getattr(self.commands, "loop_scheduler", None)
+            if sched is not None and sched.is_active:
+                sched.stop_loop()
             if self.app is not None:
                 self.app.exit()
             return
+        if cmd == "/model" and len(text.strip().split()) == 1:
+            self._open_model_modal()
+            return
+
+        # If user runs /loop stop or cancel while streaming, signal cancel event immediately
+        if cmd == "/loop" and len(text.strip().split()) > 1:
+            sub = text.strip().split()[1].lower()
+            if sub in {"stop", "cancel", "kill"} and self.streaming:
+                self.cancel_event.set()
+                if self._active_cancel_event is not None:
+                    self._active_cancel_event.set()
+
         res = self.commands.handle(text)
         if res:
+            self.model_name = self.config.agent.model.split("/")[-1]
             self.view.add(Block("command", res))
             self._invalidate()
 
@@ -631,6 +858,7 @@ class IsliTui:
     def _run_loop_turn(self, prompt: str, cancel_event: threading.Event) -> str:
         """Execute a single recurring loop turn within the full-screen TUI."""
         self.cancel_event.clear()
+        self._active_cancel_event = cancel_event
         self._ui_queue.put(("streaming_start", None))
         self._invalidate()
         tokens: list[str] = []
@@ -645,7 +873,9 @@ class IsliTui:
                 on_token=_on_tok,
                 on_tool_call=lambda name, args: self._ui_queue.put(("tool_call", (name, args))),
                 on_tool_result=lambda r: self._ui_queue.put(("tool_result", r)),
-                ask_permission=lambda t, a: self._ask_permission(t, a, self.loop.permission_gate.mode),
+                ask_permission=lambda t, a: self._ask_permission(
+                    t, a, self.loop.permission_gate.mode
+                ),
                 cancel_event=cancel_event,
             )
             return res or "".join(tokens)
@@ -654,6 +884,7 @@ class IsliTui:
             self._ui_queue.put(("error", err))
             return str(e)
         finally:
+            self._active_cancel_event = None
             if cancel_event.is_set():
                 self._ui_queue.put(("system", "[yellow]⏹ Loop turn interrupted by user.[/yellow]"))
             self._ui_queue.put(("streaming_end", None))
@@ -685,7 +916,7 @@ class IsliTui:
         self._ui_queue.put(
             (
                 "system",
-                f"[dim]⚡ Keeper: {reason} (Skipped turn, saved ~4.0k tokens). Next check in {rem}.[/dim]",
+                f"[dim]⚡ Keeper: {reason} (Skipped turn, saved ~4.0k tokens). Next: {rem}.[/dim]",
             )
         )
         self._invalidate()
@@ -694,8 +925,9 @@ class IsliTui:
         self._ui_queue.put(
             (
                 "system",
-                f"[bold green]✓ Loop condition met:[/bold green] [bold white]{condition}[/bold white] — "
-                f"Completed successfully at iteration #{task.iteration}!",
+                "[bold green]✓ Loop condition met:[/bold green] "
+                f"[bold white]{condition}[/bold white]"
+                f" — Completed successfully at iteration #{task.iteration}!",
             )
         )
         self._invalidate()
@@ -733,14 +965,28 @@ class IsliTui:
             ):
                 self.view.pop_last()
             name, args = payload
-            args_str = (
-                ", ".join(f"{k}={repr(v)[:45]}" for k, v in args.items()) if args else ""
-            )
+            args_str = ", ".join(f"{k}={repr(v)[:45]}" for k, v in args.items()) if args else ""
             self.view.add(Block("tool", meta=name, content=args_str))
         elif cmd == "tool_result":
             res = payload
             success = getattr(res, "success", True)
-            self.view.add(Block("tool_result", status="success" if success else "error"))
+            output = getattr(res, "output", "") or ""
+            meta = getattr(res, "name", "") or ""
+            diff = ""
+            if meta == "edit" and "```diff" in output:
+                start = output.find("```diff") + 7
+                end = output.find("```", start)
+                if end != -1:
+                    diff = output[start:end].strip()
+            self.view.add(
+                Block(
+                    "tool_result",
+                    meta=meta,
+                    status="success" if success else "error",
+                    output=output,
+                    diff=diff,
+                )
+            )
         elif cmd == "command":
             self.view.add(Block("command", payload))
         elif cmd in ("system", "error"):
@@ -756,6 +1002,11 @@ class IsliTui:
                 and not self.view.blocks[-1].content.strip()
             ):
                 self.view.pop_last()
+
+            # If there are queued prompts, dispatch the next one
+            if self._pending_prompts and not self.cancel_event.is_set():
+                next_prompt = self._pending_prompts.pop(0)
+                self._start_agent(next_prompt)
         elif cmd == "permission":
             tool_name, args, mode, result, done = payload
             self._open_permission_modal(tool_name, args, mode, result, done)
@@ -767,9 +1018,9 @@ class IsliTui:
             return permission_menu_tokens(
                 self._modal_tool_name, self._modal_args, self._modal_selected, self._modal_mode
             )
-        return mode_menu_tokens(
-            self._modal_modes, self._modal_current_mode, self._modal_selected
-        )
+        if self._modal_kind == "model":
+            return self._model_menu_tokens()
+        return mode_menu_tokens(self._modal_modes, self._modal_current_mode, self._modal_selected)
 
     def _open_permission_modal(
         self,
@@ -809,6 +1060,73 @@ class IsliTui:
                 Block("system", f"[bold {info.color}]● MODE: {value.value}[/bold {info.color}]")
             )
 
+    def _open_model_modal(self) -> None:
+        from isli.engine.model_catalog import get_top_openrouter_models
+
+        models = get_top_openrouter_models(limit=25)
+        self._modal_kind = "model"
+        self._modal_models = models
+        self._modal_options = [m.id for m in models]
+        self._modal_selected = 0
+        for idx, m in enumerate(models):
+            if m.id.endswith(self.model_name) or self.model_name in m.id:
+                self._modal_selected = idx
+                break
+        self._modal_result = None
+        self._modal_done = None
+        self._modal_on_choose = self._apply_model_choice
+        self._show_modal()
+
+    def _model_menu_tokens(self) -> StyleAndTextTuples:
+        models = self._modal_models
+        selected_idx = self._modal_selected
+        tokens: StyleAndTextTuples = [
+            ("class:title", "\nSelect Cloud LLM Model:\n"),
+        ]
+        start = max(0, min(selected_idx - 3, len(models) - 8))
+        end = min(len(models), start + 8)
+        for i in range(start, end):
+            m = models[i]
+            m_id = getattr(m, "id", str(m))
+            provider = getattr(m, "provider", "")
+            marker = "●" if m_id.endswith(self.model_name) else "○"
+            if i == selected_idx:
+                tokens.append(("class:pointer", " ❯ "))
+                tokens.append(("class:selected", f"{marker} {m_id}"))
+                if provider:
+                    tokens.append(("class:selected_desc", f" ({provider})\n"))
+                else:
+                    tokens.append(("class:selected", "\n"))
+            else:
+                tokens.append(("class:pointer", "   "))
+                tokens.append(("class:option", f"{marker} {m_id}"))
+                if provider:
+                    tokens.append(("class:option_desc", f" ({provider})\n"))
+                else:
+                    tokens.append(("class:option", "\n"))
+        tokens.append(
+            ("class:help", " (Use ↑/↓ arrows to navigate, Enter to choose, Esc to cancel)\n")
+        )
+        return tokens
+
+    def _apply_model_choice(self, value: Any) -> None:
+        if value:
+            from isli.config import save_global_config
+
+            selected_model = str(value)
+            self.loop.agent.config.model = selected_model
+            self.config.agent.model = selected_model
+            self.model_name = selected_model.split("/")[-1]
+            with contextlib.suppress(Exception):
+                save_global_config(self.config)
+            self.view.add(
+                Block(
+                    "system",
+                    f"[bold green]● Switched cloud LLM model to: {selected_model}[/bold green]",
+                )
+            )
+            self._invalidate()
+
     def _show_modal(self) -> None:
         if self._modal_control is None or self.app is None:
             return
@@ -816,7 +1134,7 @@ class IsliTui:
             content=Window(
                 self._modal_control,
                 style="class:modal",
-                height=Dimension(preferred=12),
+                height=Dimension(min=8, max=18, preferred=14),
             ),
             top=2,
             left=4,

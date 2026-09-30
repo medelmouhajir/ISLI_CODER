@@ -77,9 +77,7 @@ def test_mocked_llm_intelligence():
     assert "Syntax error" in val["issues"]
 
     # Test rank_results
-    mock_llm.create_chat_completion.return_value = {
-        "choices": [{"message": {"content": "[1, 0]"}}]
-    }
+    mock_llm.create_chat_completion.return_value = {"choices": [{"message": {"content": "[1, 0]"}}]}
     results = [{"name": "first"}, {"name": "second"}]
     ranked = client.rank_results(results, query="second", top_k=2)
     assert ranked[0]["name"] == "second"
@@ -167,9 +165,7 @@ def test_generate_qwen3_appends_no_think():
     mock_llm = MagicMock()
     client._llm = mock_llm
     client._loaded = True
-    mock_llm.create_chat_completion.return_value = {
-        "choices": [{"message": {"content": "ok"}}]
-    }
+    mock_llm.create_chat_completion.return_value = {"choices": [{"message": {"content": "ok"}}]}
     client._generate("test prompt")
     messages = mock_llm.create_chat_completion.call_args.kwargs["messages"]
     assert messages[1]["content"].endswith("\n/no_think")

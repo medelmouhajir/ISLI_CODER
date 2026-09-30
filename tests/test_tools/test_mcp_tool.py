@@ -28,9 +28,7 @@ def _image_block(mime: str, data: str) -> SimpleNamespace:
 
 
 def _resource_block(uri: str, text: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        type="resource", resource=SimpleNamespace(uri=uri, text=text)
-    )
+    return SimpleNamespace(type="resource", resource=SimpleNamespace(uri=uri, text=text))
 
 
 def _make_tool(client: FakeMCPClient) -> MCPTool:

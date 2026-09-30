@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import platform
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from isli.utils.permissions import Mode
 
@@ -85,9 +85,7 @@ class PromptAssembler:
     def assemble(self) -> str:
         """Compose the full system prompt text."""
         workspace_root = (
-            str(self.project_root.resolve())
-            if self.project_root
-            else str(Path.cwd().resolve())
+            str(self.project_root.resolve()) if self.project_root else str(Path.cwd().resolve())
         )
         platform_name = platform.system()
         prompt = SYSTEM_TEMPLATE.format(
@@ -102,4 +100,3 @@ class PromptAssembler:
             prompt += f"\n\n## Active Plan Tasks\n{tasks_md}\nFollow and update these tasks using the `todo` tool."
 
         return prompt
-

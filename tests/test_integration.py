@@ -49,23 +49,30 @@ def test_full_agentic_workflow(temp_project_dir):
     agent.complete.side_effect = [
         AgentResponse(
             content="I will create the calculator module.",
-            tool_calls=[{
-                "id": "c1",
-                "name": "write",
-                "arguments": {"path": "calc.py", "content": "def add(a, b):\n    return a - b\n"},
-            }],
+            tool_calls=[
+                {
+                    "id": "c1",
+                    "name": "write",
+                    "arguments": {
+                        "path": "calc.py",
+                        "content": "def add(a, b):\n    return a - b\n",
+                    },
+                }
+            ],
         ),
         AgentResponse(
             content="I noticed a bug in add(). I will edit it.",
-            tool_calls=[{
-                "id": "c2",
-                "name": "edit",
-                "arguments": {
-                    "path": "calc.py",
-                    "target": "return a - b",
-                    "replacement": "return a + b",
-                },
-            }],
+            tool_calls=[
+                {
+                    "id": "c2",
+                    "name": "edit",
+                    "arguments": {
+                        "path": "calc.py",
+                        "target": "return a - b",
+                        "replacement": "return a + b",
+                    },
+                }
+            ],
         ),
         AgentResponse(
             content="The calculator module has been created and verified.",

@@ -16,6 +16,7 @@ import os
 import platform
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -196,6 +197,7 @@ class BashTool(BaseTool):
         focus = kwargs.get("focus", "")
         description = kwargs.get("description", "")
         run_in_background = kwargs.get("run_in_background", False)
+        cancel_event = kwargs.get("cancel_event")
 
         # --- Background execution path ---
         if run_in_background and self._bg:
@@ -203,10 +205,14 @@ class BashTool(BaseTool):
 
         # --- Persistent shell path (default) ---
         if self._config.persistent_shell and self._session:
-            return self._execute_persistent(command, timeout, focus, description)
+            return self._execute_persistent(
+                command, timeout, focus, description, cancel_event=cancel_event
+            )
 
         # --- One-shot fallback path ---
-        return self._execute_oneshot(command, timeout, focus, description)
+        return self._execute_oneshot(
+            command, timeout, focus, description, cancel_event=cancel_event
+        )
 
     def _execute_background(self, command: str, description: str) -> str:
         """Launch command in the background, return task info immediately."""
@@ -233,22 +239,31 @@ class BashTool(BaseTool):
         timeout: int,
         focus: str,
         description: str,
+        cancel_event: Any | None = None,
     ) -> str:
         """Execute via persistent shell session."""
         if not self._session:
-            return self._execute_oneshot(command, timeout, focus, description)
+            return self._execute_oneshot(
+                command, timeout, focus, description, cancel_event=cancel_event
+            )
 
         try:
             self._session.start()  # No-op if already running
         except Exception:
             # Fall back to one-shot if persistent shell fails to start
-            return self._execute_oneshot(command, timeout, focus, description)
+            return self._execute_oneshot(
+                command, timeout, focus, description, cancel_event=cancel_event
+            )
 
-        return_code, stdout, stderr = self._session.execute(command, timeout=timeout)
+        return_code, stdout, stderr = self._session.execute(
+            command, timeout=timeout, cancel_event=cancel_event
+        )
 
         # If shell crashed, fall back to one-shot for this command
-        if return_code == -1 and "Error:" in stderr:
-            return self._execute_oneshot(command, timeout, focus, description)
+        if return_code == -1 and "Error:" in stderr and "Command aborted" not in stderr:
+            return self._execute_oneshot(
+                command, timeout, focus, description, cancel_event=cancel_event
+            )
 
         return self._format_output(command, return_code, stdout, stderr, focus, description)
 
@@ -258,6 +273,7 @@ class BashTool(BaseTool):
         timeout: int,
         focus: str,
         description: str,
+        cancel_event: Any | None = None,
     ) -> str:
         """Execute via fresh one-shot subprocess (original behavior)."""
         env = os.environ.copy()
@@ -317,12 +333,24 @@ class BashTool(BaseTool):
         t_err.start()
 
         try:
-            return_code = process.wait(timeout=timeout)
+            start_wait = time.time()
+            return_code = None
+            while return_code is None:
+                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                    _terminate_process_tree(process, self._config.grace_seconds)
+                    t_out.join(timeout=1.0)
+                    t_err.join(timeout=1.0)
+                    return "Command aborted by user interruption."
+
+                try:
+                    return_code = process.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    if (time.time() - start_wait) >= timeout:
+                        _terminate_process_tree(process, self._config.grace_seconds)
+                        return f"Error: Command timed out after {timeout} seconds."
+
             t_out.join(timeout=2.0)
             t_err.join(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            _terminate_process_tree(process, self._config.grace_seconds)
-            return f"Error: Command timed out after {timeout} seconds."
         except Exception as e:
             _terminate_process_tree(process, self._config.grace_seconds)
             return f"Error executing command: {e}"
@@ -349,7 +377,14 @@ class BashTool(BaseTool):
         is_file_view = any(
             command.strip().lower().startswith(prefix)
             for prefix in (
-                "cat ", "type ", "head ", "tail ", "get-content ", "gc ", "more ", "less "
+                "cat ",
+                "type ",
+                "head ",
+                "tail ",
+                "get-content ",
+                "gc ",
+                "more ",
+                "less ",
             )
         )
 

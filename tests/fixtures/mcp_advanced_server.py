@@ -86,9 +86,7 @@ def main() -> None:
                 response_line = sys.stdin.readline().strip()
                 sample_resp = json.loads(response_line)
                 assistant_text = (
-                    sample_resp.get("result", {})
-                    .get("content", {})
-                    .get("text", "no text")
+                    sample_resp.get("result", {}).get("content", {}).get("text", "no text")
                 )
                 # Reply to the tools/call request
                 send(
@@ -147,7 +145,11 @@ def main() -> None:
                                 "name": "code_review",
                                 "description": "Review given code snippet",
                                 "arguments": [
-                                    {"name": "code", "description": "Code to review", "required": True}
+                                    {
+                                        "name": "code",
+                                        "description": "Code to review",
+                                        "required": True,
+                                    }
                                 ],
                             }
                         ]

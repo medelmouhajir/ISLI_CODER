@@ -1,6 +1,5 @@
 """Tests for CLI and CommandHandler."""
 
-
 from unittest.mock import patch
 
 from isli.cli import create_components
@@ -89,7 +88,9 @@ def test_create_components(tmp_path):
     assert loop is not None
     assert commands is not None
     assert session_mgr is not None
-    assert len(loop.tool_engine.get_definitions()) == 10  # 10 tools registered (including tasks & todo)!
+    assert (
+        len(loop.tool_engine.get_definitions()) == 10
+    )  # 10 tools registered (including tasks & todo)!
 
 
 def test_command_handler_tasks(tmp_path, monkeypatch):

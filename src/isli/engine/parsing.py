@@ -93,11 +93,13 @@ def _parse_xml_tool_calls(content: str) -> list[dict[str, Any]]:
             except Exception:
                 args = {"content": body}
 
-        results.append({
-            "id": f"xml_call_{i}",
-            "name": name,
-            "arguments": args,
-        })
+        results.append(
+            {
+                "id": f"xml_call_{i}",
+                "name": name,
+                "arguments": args,
+            }
+        )
 
     if results:
         return results
@@ -115,11 +117,13 @@ def _parse_xml_tool_calls(content: str) -> list[dict[str, Any]]:
                         args = json.loads(args)
                     except json.JSONDecodeError:
                         args = {"raw": args}
-                results.append({
-                    "id": f"xml_tc_{i}",
-                    "name": data["name"],
-                    "arguments": args or {},
-                })
+                results.append(
+                    {
+                        "id": f"xml_tc_{i}",
+                        "name": data["name"],
+                        "arguments": args or {},
+                    }
+                )
         except Exception:
             continue
 
@@ -137,11 +141,7 @@ def _parse_json_block_tool_calls(content: str) -> list[dict[str, Any]]:
             parsed = json.loads(code_block)
             if isinstance(parsed, dict):
                 # Formats: {"tool": "...", "arguments": ...} or {"action": "..."}
-                tool_name = (
-                    parsed.get("tool")
-                    or parsed.get("action")
-                    or parsed.get("name")
-                )
+                tool_name = parsed.get("tool") or parsed.get("action") or parsed.get("name")
                 arguments = (
                     parsed.get("arguments")
                     or parsed.get("action_input")
@@ -158,11 +158,13 @@ def _parse_json_block_tool_calls(content: str) -> list[dict[str, Any]]:
                         except json.JSONDecodeError:
                             arguments = {"input": arguments}
 
-                    results.append({
-                        "id": f"json_call_{i}",
-                        "name": tool_name.strip(),
-                        "arguments": arguments,
-                    })
+                    results.append(
+                        {
+                            "id": f"json_call_{i}",
+                            "name": tool_name.strip(),
+                            "arguments": arguments,
+                        }
+                    )
             elif isinstance(parsed, list):
                 for j, item in enumerate(parsed):
                     has_tool_key = isinstance(item, dict) and any(
@@ -176,11 +178,13 @@ def _parse_json_block_tool_calls(content: str) -> list[dict[str, Any]]:
                             or item.get("args")
                             or {}
                         )
-                        results.append({
-                            "id": f"json_list_call_{i}_{j}",
-                            "name": str(tool_name).strip(),
-                            "arguments": arguments,
-                        })
+                        results.append(
+                            {
+                                "id": f"json_list_call_{i}_{j}",
+                                "name": str(tool_name).strip(),
+                                "arguments": arguments,
+                            }
+                        )
         except Exception:
             continue
 
@@ -204,10 +208,12 @@ def _parse_action_tags(content: str) -> list[dict[str, Any]]:
         except Exception:
             args = {"input": raw_input}
 
-        results.append({
-            "id": f"action_call_{i}",
-            "name": tool_name,
-            "arguments": args if isinstance(args, dict) else {"input": args},
-        })
+        results.append(
+            {
+                "id": f"action_call_{i}",
+                "name": tool_name,
+                "arguments": args if isinstance(args, dict) else {"input": args},
+            }
+        )
 
     return results

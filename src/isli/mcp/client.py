@@ -103,9 +103,7 @@ class _JsonRpcTransport:
         if not pending.event.wait(timeout=self.call_timeout):
             with self._lock:
                 self._pending.pop(msg_id, None)
-            raise TimeoutError(
-                f"MCP request '{method}' timed out after {self.call_timeout:.0f}s."
-            )
+            raise TimeoutError(f"MCP request '{method}' timed out after {self.call_timeout:.0f}s.")
         if pending.error is not None:
             raise pending.error
         return pending.result
@@ -114,9 +112,7 @@ class _JsonRpcTransport:
         """Send a fire-and-forget notification (no id, no response)."""
         if self._closed:
             return
-        self._write_message(
-            {"jsonrpc": "2.0", "method": method, "params": params or {}}
-        )
+        self._write_message({"jsonrpc": "2.0", "method": method, "params": params or {}})
 
     def _write_message(self, message: dict[str, Any]) -> None:
         raise NotImplementedError
@@ -247,8 +243,7 @@ class _StdioTransport(_JsonRpcTransport):
             )
         except OSError as e:
             raise ConnectionError(
-                f"MCP server '{self.server.name}': failed to start "
-                f"'{self.server.command}': {e}"
+                f"MCP server '{self.server.name}': failed to start '{self.server.command}': {e}"
             ) from e
 
         self._reader_thread = threading.Thread(
@@ -288,16 +283,12 @@ class _StdioTransport(_JsonRpcTransport):
     def _write_message(self, message: dict[str, Any]) -> None:
         proc = self._proc
         if proc is None or proc.stdin is None or proc.poll() is not None:
-            raise ConnectionError(
-                f"MCP server '{self.server.name}' process is not running."
-            )
+            raise ConnectionError(f"MCP server '{self.server.name}' process is not running.")
         try:
             proc.stdin.write(json.dumps(message) + "\n")
             proc.stdin.flush()
         except (BrokenPipeError, OSError) as e:
-            raise ConnectionError(
-                f"MCP server '{self.server.name}' pipe closed: {e}"
-            ) from e
+            raise ConnectionError(f"MCP server '{self.server.name}' pipe closed: {e}") from e
 
     def close(self) -> None:
         proc = self._proc
@@ -607,9 +598,7 @@ class MCPClient:
         """Return prompt definitions: name, description, arguments."""
         return list(self._prompts)
 
-    def get_prompt(
-        self, name: str, arguments: dict[str, str] | None = None
-    ) -> dict[str, Any]:
+    def get_prompt(self, name: str, arguments: dict[str, str] | None = None) -> dict[str, Any]:
         """Get a prompt by name with arguments. Returns {"description", "messages": [...] }."""
         if not self._connected or self._transport is None:
             raise ConnectionError(

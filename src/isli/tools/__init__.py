@@ -72,11 +72,13 @@ def register_all(
 
     # Register TasksTool if background manager is provided
     if background_manager:
-        tools.append(TasksTool(
-            background_manager=background_manager,
-            keeper=keeper,
-            project_root=project_root,
-        ))
+        tools.append(
+            TasksTool(
+                background_manager=background_manager,
+                keeper=keeper,
+                project_root=project_root,
+            )
+        )
 
     for tool in tools:
         engine.register(tool)

@@ -26,8 +26,15 @@ class GitTool(BaseTool):
                         "type": "string",
                         "description": "Git subcommand",
                         "enum": [
-                            "status", "diff", "log", "branch", "add", "commit",
-                            "push", "checkout", "stash",
+                            "status",
+                            "diff",
+                            "log",
+                            "branch",
+                            "add",
+                            "commit",
+                            "push",
+                            "checkout",
+                            "stash",
                         ],
                     },
                     "args": {

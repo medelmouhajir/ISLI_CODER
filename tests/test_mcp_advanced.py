@@ -4,8 +4,6 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from isli.commands import CommandHandler
 from isli.config import Config, MCPBehaviorConfig
 from isli.engine.react_loop import ReActLoop
@@ -81,8 +79,6 @@ def test_server_sampling():
 
 def test_manager_resources_and_prompts(tmp_path):
     mgr = MCPManager(project_root=tmp_path, behavior=MCPBehaviorConfig())
-    keeper = MagicMock()
-    tool_engine = MagicMock()
 
     mgr._clients["adv"] = MCPClient(_adv_server())
     mgr._clients["adv"].connect()
@@ -141,11 +137,14 @@ def test_react_loop_resource_mention(tmp_path):
 
 def test_commands_resources_and_prompts():
     mgr = MagicMock()
-    mgr.get_resources.return_value = [
-        {"server": "test", "uri": "test://doc", "description": "Doc"}
-    ]
+    mgr.get_resources.return_value = [{"server": "test", "uri": "test://doc", "description": "Doc"}]
     mgr.get_prompts.return_value = [
-        {"server": "test", "name": "explain", "arguments": [{"name": "topic"}], "description": "Explain"}
+        {
+            "server": "test",
+            "name": "explain",
+            "arguments": [{"name": "topic"}],
+            "description": "Explain",
+        }
     ]
     mgr.get_prompt.return_value = {
         "description": "Explains a topic",

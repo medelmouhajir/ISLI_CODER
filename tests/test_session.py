@@ -69,9 +69,9 @@ def test_history_compaction():
     keeper._loaded = True
     keeper._llm = MagicMock()
     keeper._llm.create_chat_completion.return_value = {
-        "choices": [{
-            "message": {"content": "User asked 10 questions. Assistant provided answers."}
-        }]
+        "choices": [
+            {"message": {"content": "User asked 10 questions. Assistant provided answers."}}
+        ]
     }
 
     messages = [{"role": "system", "content": "You are ISLI"}]
@@ -131,4 +131,3 @@ def test_session_manager_plan_tasks_persistence(tmp_path):
     assert loaded_tasks[0].status == "completed"
     assert loaded_tasks[1].subject == "Step 2: Build"
     assert loaded_tasks[1].status == "in_progress"
-
