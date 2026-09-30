@@ -1,0 +1,2 @@
+[console_scripts]
+isli = isli.cli:main

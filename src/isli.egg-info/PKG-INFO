@@ -1,0 +1,167 @@
+Metadata-Version: 2.4
+Name: isli
+Version: 0.1.0
+Summary: ISLI — AI coding CLI with local intelligence
+Author: ISLI Team
+License-Expression: MIT
+Keywords: ai,coding,cli,local-intelligence,llm,developer-tools
+Classifier: Development Status :: 3 - Alpha
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Developers
+Classifier: Topic :: Software Development
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: litellm>=1.40
+Requires-Dist: rich>=13.0
+Requires-Dist: prompt-toolkit>=3.0
+Requires-Dist: tiktoken>=0.7.0
+Requires-Dist: pydantic>=2.0
+Requires-Dist: huggingface-hub>=0.20
+Requires-Dist: tomli>=2.0; python_version < "3.11"
+Requires-Dist: tomli-w>=1.0
+Provides-Extra: keeper
+Requires-Dist: llama-cpp-python>=0.3.0; extra == "keeper"
+Provides-Extra: keeper-cuda
+Requires-Dist: llama-cpp-python>=0.3.0; extra == "keeper-cuda"
+Requires-Dist: nvidia-cuda-runtime-cu12>=12.0; extra == "keeper-cuda"
+Requires-Dist: nvidia-cublas-cu12>=12.0; extra == "keeper-cuda"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
+Requires-Dist: ruff>=0.11; extra == "dev"
+Requires-Dist: mypy>=1.10; extra == "dev"
+Provides-Extra: all
+Requires-Dist: isli[dev,keeper]; extra == "all"
+Dynamic: license-file
+
+# ISLI (`isli`)
+
+Standalone AI coding CLI with a **dual-model architecture**:
+- **Cloud Reasoning Brain**: Any model via LiteLLM (OpenRouter, Claude 3.5 Sonnet, GPT-4o, Gemini 2.5).
+- **Embedded Local Keeper**: Configurable small GGUF model (`smollm2-135m` default, `qwen3-0.6b`, `qwen2.5-coder-1.5b`) running via `llama-cpp-python` as an intelligence layer inside every tool.
+
+---
+
+## Key Features
+
+1. **Dual-Model Architecture**:
+   - Cloud LLM handles high-level reasoning and planning.
+   - Local Keeper SLM pre-processes tool inputs and outputs (extracts relevant snippets, validates code edits, ranks searches, summarizes diffs and command outputs).
+   - Drastically cuts cloud token costs and latency while keeping code understanding fast and accurate.
+2. **8 Smart Tools**:
+   - `read`: Reads files with line numbers; extracts focused excerpts on large files via Keeper.
+   - `write`: Creates or overwrites files; generates boilerplate locally via Keeper if needed.
+   - `edit`: Exact search-and-replace; pre-validated for syntax and presence by Keeper before atomic write.
+   - `grep`: Regex and text search with relevance ranking.
+   - `glob`: Workspace file discovery with pattern filtering.
+   - `bash`: Shell execution with Keeper parsing and summarization of large command outputs.
+   - `code_search`: Python AST symbol indexing and search with multi-language regex fallback.
+   - `git`: Status, diff, commit, branch, checkout, stash, and log operations with diff summarization.
+3. **Claude Code-Style Permission Safety**:
+   - Read-only tools (`read`, `grep`, `glob`, `code_search`) are always allowed.
+   - Mutating tools (`write`, `edit`, `bash`, `git commit/push/checkout/stash`) prompt with an interactive arrow-navigable menu (`↑`/`↓` and `Enter`) or instant `y`/`n`/`a` hotkeys.
+4. **Session Persistence, Caching & History Compaction**:
+   - SQLite persistence at `~/.isli/sessions.db`.
+   - Semantic result cache (`KeeperCache`) with configurable TTL to avoid redundant tool executions.
+   - Pre-flight token gate to compress oversized tool outputs before sending to the cloud LLM.
+   - Automatic history compaction via Keeper when conversation reaches 70% of context budget.
+5. **Interactive REPL & Slash Commands**:
+   - Rich terminal UI with real-time token and cost budget indicators.
+   - Live autocomplete dropdown when typing `/` with Up/Down arrow selection and descriptions.
+   - Persistent command history across sessions via Up/Down arrow recall.
+   - Commands: `/help`, `/pwd`, `/model`, `/keeper`, `/cost`, `/cache`, `/clear`, `/compact`, `/memory`, `/config`, `/permissions`, `/save`, `/load`, `/sessions`, `/exit`.
+
+---
+
+## Installation
+
+```bash
+cd isli
+# Full install with local Keeper SLM support:
+pip install -e ".[all]"
+
+# Or install core with keeper:
+pip install -e ".[keeper]"
+```
+
+---
+
+## Usage
+
+### Interactive REPL
+```bash
+isli
+```
+
+### One-Shot Execution
+```bash
+isli "Find all endpoints in src/api and list them"
+```
+
+### Overriding Models
+```bash
+# Override Cloud LLM
+isli --model openai/gpt-4o
+
+# Override Local Keeper SLM
+isli --keeper qwen2.5-coder-1.5b
+
+# Disable Local Keeper (graceful degradation)
+isli --no-keeper
+```
+
+---
+
+## Configuration
+
+Configuration uses a 3-tier precedence order:
+1. Built-in defaults
+2. User global config: `~/.isli/config.toml`
+3. Project-specific config: `.isli/config.toml`
+4. Environment variables (`ISLI_MODEL`, `ISLI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
+5. CLI flags (`--model`, `--keeper`, `--no-keeper`)
+
+Sample `~/.isli/config.toml`:
+
+```toml
+[agent]
+model = "openrouter/anthropic/claude-sonnet-4.5"
+max_tokens = 8192
+temperature = 0.0
+
+[keeper]
+model_name = "smollm2-135m"
+n_ctx = 8192
+n_threads = 4
+enabled = true
+
+[behavior]
+context_budget = 800
+max_turns = 50
+history_budget = 16000
+
+[permissions]
+require_approval = ["write", "edit", "bash", "git"]
+always_allow = ["read", "grep", "glob", "code_search"]
+```
+
+---
+
+## Testing & Quality Gates
+
+Run the test suite:
+
+```bash
+pytest -q
+```
+
+Run lint checks:
+
+```bash
+ruff check src/ tests/
+```
