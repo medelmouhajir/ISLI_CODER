@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,7 @@ class ToolResult:
     output: str
     success: bool = True
     latency_ms: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ToolEngine:
@@ -52,6 +53,13 @@ class ToolEngine:
         schema = tool.schema()
         self._tools[schema.name] = tool
         log.debug(f"Registered tool: {schema.name}")
+
+    def unregister(self, name: str) -> bool:
+        """Unregister a tool instance by name. Returns True if removed."""
+        removed = self._tools.pop(name, None) is not None
+        if removed:
+            log.debug(f"Unregistered tool: {name}")
+        return removed
 
     def get_definitions(self) -> list[dict[str, Any]]:
         """Return OpenAI-format tool definitions for the cloud LLM."""
@@ -97,7 +105,7 @@ class ToolEngine:
         t0 = time.perf_counter()
 
         # Check semantic cache for read/search tools
-        is_cacheable = name in {"read", "grep", "glob", "code_search"}
+        is_cacheable = name in {"read", "grep", "glob", "code_search", "web_search", "web_fetch"}
         cache_key_content = json.dumps(arguments, sort_keys=True, default=str)
         if name == "read":
             try:
@@ -119,7 +127,7 @@ class ToolEngine:
                 call_kwargs["cancel_event"] = cancel_event
 
             output = tool.execute(**call_kwargs)
-            if name in {"write", "edit"}:
+            if name in {"write", "edit", "patch"}:
                 self._search_generation += 1
             raw_tokens = count_tokens(output)
 
@@ -144,7 +152,14 @@ class ToolEngine:
                 tokens_saved = max(0, raw_tokens - final_tokens)
                 self.cache.put(name, cache_key_content, output, tokens_saved=tokens_saved)
 
-            return ToolResult(name=name, output=output, success=True, latency_ms=latency)
+            tool_metadata = getattr(tool, "last_metadata", {})
+            return ToolResult(
+                name=name,
+                output=output,
+                success=True,
+                latency_ms=latency,
+                metadata=tool_metadata,
+            )
 
         except PermissionError as e:
             return ToolResult(
@@ -167,6 +182,18 @@ class ToolEngine:
 
     def _pre_flight_gate(self, tool_name: str, output: str, tokens: int) -> str:
         """Progressively compress output using Keeper to fit token budget."""
+        # Code inspection and diff tools MUST NEVER be converted to SLM prose summaries,
+        # which destroy line numbers, CSS/code syntax, and exact contents.
+        no_summarize_tools = {"read", "patch", "edit", "write", "todo", "ask_user", "tasks"}
+        if tool_name in no_summarize_tools:
+            if tokens > 8000:
+                truncated = head_tail(output, 8000)
+                return (
+                    f"[Truncated: showing head and tail of {tool_name} output ({tokens} tokens). "
+                    "Use offset and limit parameters to inspect specific sections.]\n" + truncated
+                )
+            return output
+
         if tokens <= 2000:
             return output
 

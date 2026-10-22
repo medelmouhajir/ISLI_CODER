@@ -47,6 +47,16 @@ class EditTool(BaseTool):
         if not rel_path or target is None or replacement is None:
             return "Error: 'path', 'target', and 'replacement' parameters are all required."
 
+        # If replacement has outer code fences but target does not, sanitize replacement
+        if (
+            isinstance(replacement, str)
+            and isinstance(target, str)
+            and not target.strip().startswith("```")
+            and replacement.strip().startswith("```")
+        ):
+            from isli.tools.write import strip_code_fences
+            replacement = strip_code_fences(replacement)
+
         target_path = self.resolve_path(rel_path)
         if not target_path.exists():
             return f"Error: File '{rel_path}' does not exist."

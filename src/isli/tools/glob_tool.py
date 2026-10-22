@@ -53,13 +53,23 @@ class GlobTool(BaseTool):
         if not start_path.exists():
             return f"Error: Path '{start_path_str}' does not exist."
 
+        # Determine which IGNORE_PARTS were explicitly requested in path or pattern
+        norm_pattern = pattern.replace("\\", "/")
+        pattern_segments = set(norm_pattern.split("/"))
+        start_parts = set(start_path.parts)
+        explicit_parts = {p for p in IGNORE_PARTS if p in pattern_segments or p in start_parts}
+        active_ignore = IGNORE_PARTS - explicit_parts
+
         matched_files: list[str] = []
         try:
             # Recursively match pattern from start_path
             for match in start_path.glob(pattern):
-                # Filter ignored paths
-                parts = set(match.parts)
-                if any(ignored in parts for ignored in IGNORE_PARTS):
+                # Filter ignored paths relative to start_path
+                try:
+                    rel_parts = set(match.relative_to(start_path).parts)
+                except ValueError:
+                    rel_parts = set(match.parts)
+                if any(ignored in rel_parts for ignored in active_ignore):
                     continue
                 if match.is_file():
                     try:

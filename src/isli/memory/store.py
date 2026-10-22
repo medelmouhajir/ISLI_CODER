@@ -70,6 +70,14 @@ class SessionStore:
             existing_s_cols = {row[1] for row in cursor_s.fetchall()}
             if "tasks" not in existing_s_cols:
                 conn.execute("ALTER TABLE sessions ADD COLUMN tasks TEXT")
+            if "prompt_tokens" not in existing_s_cols:
+                conn.execute("ALTER TABLE sessions ADD COLUMN prompt_tokens INTEGER DEFAULT 0")
+            if "completion_tokens" not in existing_s_cols:
+                conn.execute("ALTER TABLE sessions ADD COLUMN completion_tokens INTEGER DEFAULT 0")
+            if "cached_tokens" not in existing_s_cols:
+                conn.execute("ALTER TABLE sessions ADD COLUMN cached_tokens INTEGER DEFAULT 0")
+            if "cost_usd" not in existing_s_cols:
+                conn.execute("ALTER TABLE sessions ADD COLUMN cost_usd REAL DEFAULT 0.0")
             conn.commit()
 
     def create_session(
@@ -98,7 +106,7 @@ class SessionStore:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
-                SELECT id, name, model, tasks, created_at, updated_at
+                SELECT id, name, model, tasks, prompt_tokens, completion_tokens, cached_tokens, cost_usd, created_at, updated_at
                 FROM sessions ORDER BY updated_at DESC
                 """
             )
@@ -110,7 +118,7 @@ class SessionStore:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
-                SELECT id, name, model, tasks, created_at, updated_at
+                SELECT id, name, model, tasks, prompt_tokens, completion_tokens, cached_tokens, cost_usd, created_at, updated_at
                 FROM sessions WHERE id = ? OR name = ?
                 """,
                 (identifier, identifier),
@@ -125,6 +133,45 @@ class SessionStore:
             else:
                 res["tasks"] = []
             return res
+
+    def update_session_telemetry(
+        self,
+        session_id: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cached_tokens: int,
+        cost_usd: float,
+    ) -> None:
+        """Update token and cost telemetry for a session."""
+        try:
+            p_tok = int(prompt_tokens)
+            c_tok = int(completion_tokens)
+            cached = int(cached_tokens)
+            cost = float(cost_usd)
+        except (TypeError, ValueError):
+            return
+
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE sessions
+                SET prompt_tokens = ?, completion_tokens = ?, cached_tokens = ?, cost_usd = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (p_tok, c_tok, cached, cost, now, session_id),
+            )
+            conn.commit()
+
+    def update_session_model(self, session_id: str, model: str) -> None:
+        """Update the active LLM model identifier for a session."""
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET model = ?, updated_at = ? WHERE id = ?",
+                (model, now, session_id),
+            )
+            conn.commit()
 
     def save_tasks(self, session_id: str, tasks: list[dict[str, Any]]) -> None:
         """Save active tasks for a session."""

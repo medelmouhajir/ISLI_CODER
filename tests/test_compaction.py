@@ -124,3 +124,45 @@ def test_compact_history_smart_with_keeper():
     )
     assert len(compacted) < len(messages)
     assert "Goal-focused summary" in compacted[1]["content"]
+
+
+def test_prune_tool_observations_ghosts_older_bulky_results():
+    """Verify prune_tool_observations compresses older tool outputs while preserving recent ones."""
+    from isli.memory.compaction import prune_tool_observations
+
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "read file 1"},
+        {"role": "assistant", "content": "reading file 1"},
+        {
+            "role": "tool",
+            "name": "read",
+            "content": "line 1\nline 2\n" + ("code line\n" * 50),
+        },
+        {"role": "assistant", "content": "ran tests"},
+        {
+            "role": "tool",
+            "name": "bash",
+            "content": "pytest output header\n" + ("test error traceback\n" * 40) + "FAILED 3 tests",
+        },
+        {"role": "user", "content": "now read file 2"},
+        {"role": "assistant", "content": "reading file 2"},
+        {
+            "role": "tool",
+            "name": "read",
+            "content": "recent file content\nexact line 1\nexact line 2",
+        },
+    ]
+
+    # Keep only the last 3 messages as recent
+    pruned = prune_tool_observations(messages, keep_recent_messages=3, char_threshold=50)
+
+    # Older tools (indices 3 and 5) must be compacted
+    assert "[File content read" in pruned[3]["content"]
+    assert "compacted for context efficiency" in pruned[3]["content"]
+
+    assert "[bash output" in pruned[5]["content"]
+    assert "compacted" in pruned[5]["content"]
+
+    # Recent tool (index 8) must remain completely intact
+    assert pruned[8]["content"] == "recent file content\nexact line 1\nexact line 2"

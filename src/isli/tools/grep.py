@@ -68,6 +68,12 @@ class GrepTool(BaseTool):
             # Fallback to literal search if invalid regex
             regex = re.compile(re.escape(query), re.IGNORECASE)
 
+        # Determine which IGNORE_DIRS were explicitly targeted
+        root_parts = set(root_search.parts)
+        pattern_segments = set(file_pattern.replace("\\", "/").split("/"))
+        explicit_dirs = {d for d in IGNORE_DIRS if d in root_parts or d in pattern_segments}
+        active_ignore_dirs = IGNORE_DIRS - explicit_dirs
+
         raw_results: list[dict[str, Any]] = []
 
         if root_search.is_file():
@@ -75,7 +81,7 @@ class GrepTool(BaseTool):
         else:
             files_to_check = []
             for root, dirs, files in os.walk(root_search):
-                dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+                dirs[:] = [d for d in dirs if d not in active_ignore_dirs]
                 for file_name in files:
                     if fnmatch.fnmatch(file_name, file_pattern):
                         files_to_check.append(Path(root) / file_name)

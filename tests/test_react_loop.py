@@ -384,7 +384,108 @@ def test_react_loop_todo_tool_syncs_plan_tasks(temp_project_dir):
     assert tasks[0].subject == "Write code"
     assert tasks[0].status == "in_progress"
 
-    # Check that PromptAssembler now includes Active Plan Tasks in prompt
-    system_prompt = prompt_asm.assemble()
-    assert "Active Plan Tasks" in system_prompt
-    assert "Write code" in system_prompt
+    # Check that PromptAssembler dynamic context now includes Active Plan Tasks
+    dynamic_context = prompt_asm.assemble_dynamic_context()
+    assert "Active Plan Tasks" in dynamic_context
+    assert "Write code" in dynamic_context
+
+
+def test_react_loop_does_not_dedupe_read_tool(temp_project_dir, mock_keeper):
+    # Setup test file
+    test_file = temp_project_dir / "target.py"
+    test_file.write_text("x = 42\ny = 100\n", encoding="utf-8")
+
+    from isli.tools.read import ReadTool
+
+    read_tool = ReadTool(keeper=mock_keeper, project_root=temp_project_dir)
+    te = ToolEngine(keeper=mock_keeper, project_root=temp_project_dir)
+    te.register(read_tool)
+
+    agent_mock = MagicMock(spec=AgentClient)
+    # Turn 1 and 2 call read on the same file
+    # Turn 3: final answer
+    agent_mock.complete.side_effect = [
+        AgentResponse(
+            content="Let me read target.py",
+            tool_calls=[{"id": "call_r1", "name": "read", "arguments": {"path": "target.py"}}],
+        ),
+        AgentResponse(
+            content="Let me read target.py again to confirm line numbers",
+            tool_calls=[{"id": "call_r2", "name": "read", "arguments": {"path": "target.py"}}],
+        ),
+        AgentResponse(
+            content="Target confirmed. All set!",
+            tool_calls=[],
+        ),
+    ]
+
+    ctx_mgr = ContextManager(temp_project_dir)
+    prompt_asm = PromptAssembler(te, ctx_mgr)
+    session_mgr = SessionManager(SessionStore(temp_project_dir / "s_read.db"))
+    session_mgr.start_new()
+    perm_gate = PermissionGate()
+
+    loop = ReActLoop(
+        agent=agent_mock,
+        tool_engine=te,
+        prompt_assembler=prompt_asm,
+        keeper=mock_keeper,
+        permission_gate=perm_gate,
+        session_manager=session_mgr,
+        context_manager=ctx_mgr,
+        max_turns=5,
+    )
+
+    out = loop.run("Inspect target.py")
+    assert "All set!" in out
+
+    hist = session_mgr.get_history()
+    tool_messages = [m for m in hist if m["role"] == "tool"]
+    assert len(tool_messages) == 2
+    # Both calls must contain actual file content, neither should have been replaced with omission notice
+    assert "x = 42" in tool_messages[0]["content"]
+    assert "x = 42" in tool_messages[1]["content"]
+    assert "identical to tool call" not in tool_messages[1]["content"]
+
+
+def test_react_loop_clears_seen_outputs_on_compaction(tool_engine, mock_keeper, temp_project_dir):
+    agent_mock = MagicMock(spec=AgentClient)
+    agent_mock.complete.side_effect = [
+        AgentResponse(
+            content="Dummy call 1",
+            tool_calls=[{"id": "call_1", "name": "dummy", "arguments": {"message": "ping"}}],
+        ),
+        AgentResponse(
+            content="Dummy call 2 after compaction",
+            tool_calls=[{"id": "call_2", "name": "dummy", "arguments": {"message": "ping"}}],
+        ),
+        AgentResponse(
+            content="Done!",
+            tool_calls=[],
+        ),
+    ]
+
+    ctx_mgr = ContextManager(temp_project_dir)
+    prompt_asm = PromptAssembler(tool_engine, ctx_mgr)
+    session_mgr = SessionManager(SessionStore(temp_project_dir / "s_comp.db"))
+    session_mgr.start_new()
+    # Add long history to ensure compaction triggers
+    for i in range(12):
+        session_mgr.add_message("user", f"Turn {i} with lots of context details " * 20)
+        session_mgr.add_message("assistant", f"Response {i} with explanations " * 20)
+
+    perm_gate = PermissionGate()
+
+    loop = ReActLoop(
+        agent=agent_mock,
+        tool_engine=tool_engine,
+        prompt_assembler=prompt_asm,
+        keeper=mock_keeper,
+        permission_gate=perm_gate,
+        session_manager=session_mgr,
+        context_manager=ctx_mgr,
+        max_turns=5,
+    )
+
+    out = loop.run("Run dummy tool")
+    assert "Done!" in out

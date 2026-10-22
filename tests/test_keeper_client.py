@@ -15,7 +15,7 @@ def test_model_catalog():
     assert "smollm2-135m" in MODEL_CATALOG
     assert "qwen3-0.6b" in MODEL_CATALOG
     assert "qwen2.5-coder-1.5b" in MODEL_CATALOG
-    assert DEFAULT_MODEL == "smollm2-135m"
+    assert DEFAULT_MODEL == "qwen3-0.6b"
 
 
 def test_disabled_keeper_graceful_degradation():

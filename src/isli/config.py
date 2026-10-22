@@ -24,13 +24,44 @@ from isli.utils.permissions import ALWAYS_ALLOW, REQUIRE_APPROVAL
 
 
 @dataclass
+class OpenRouterConfig:
+    """Config for OpenRouter provider."""
+
+    api_key: str | None = None
+    api_base: str = "https://openrouter.ai/api/v1"
+
+
+@dataclass
+class OllamaConfig:
+    """Config for Ollama provider."""
+
+    api_base: str = "http://localhost:11434"
+    api_key: str | None = None
+    timeout: float = 60.0
+
+
+@dataclass
+class ProvidersConfig:
+    """Config for LLM model providers."""
+
+    default: str = "openrouter"  # "openrouter" | "ollama"
+    openrouter: OpenRouterConfig = field(default_factory=OpenRouterConfig)
+    ollama: OllamaConfig = field(default_factory=OllamaConfig)
+
+
+@dataclass
 class BehaviorConfig:
     """Config for agentic loop behavior and budgets."""
 
-    context_budget: int = 800
+    context_budget: int = 1200
     max_turns: int = 50
     history_budget: int = 16000
     cache_ttl: int = 300
+    tree_max_lines: int = 50
+    subagent_enabled: bool = True
+    max_concurrent_subagents: int = 3
+    max_subagent_turns: int = 15
+    subagent_cloud_model: str = ""
 
 
 @dataclass
@@ -76,6 +107,36 @@ class PermissionsConfig:
 
 
 @dataclass
+class WebConfig:
+    """Config for web search and fetch tools."""
+
+    search_provider: str = "auto"  # "auto", "duckduckgo", "tavily", "brave"
+    tavily_api_key: str | None = None
+    brave_api_key: str | None = None
+    searxng_url: str | None = None
+    max_search_results: int = 5
+    fetch_max_chars: int = 20_000
+    timeout: float = 15.0
+    user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (compatible; ISLI-Coder/0.1)"
+    )
+
+
+@dataclass
+class SkillsConfig:
+    """Config for self-evolving skills and custom tools."""
+
+    enabled: bool = True
+    allow_scripts: bool = True
+    default_scope: str = "user"
+    script_timeout: int = 120
+    max_index_items: int = 30
+    max_skills: int = 100
+    subagent_untrusted_tools: bool = False
+
+
+@dataclass
 class Config:
     """Consolidated configuration for ISLI."""
 
@@ -85,6 +146,9 @@ class Config:
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
     bash: BashConfig = field(default_factory=BashConfig)
     mcp: MCPBehaviorConfig = field(default_factory=MCPBehaviorConfig)
+    web: WebConfig = field(default_factory=WebConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
+    providers: ProvidersConfig = field(default_factory=ProvidersConfig)
 
 
 def load_config(
@@ -116,6 +180,29 @@ def load_config(
     keeper_data = cfg_data.get("keeper", {})
     behavior_data = cfg_data.get("behavior", {})
     perm_data = cfg_data.get("permissions", {})
+    providers_data = cfg_data.get("providers", {})
+
+    openrouter_data = providers_data.get("openrouter", {})
+    ollama_data = providers_data.get("ollama", {})
+
+    openrouter_cfg = OpenRouterConfig(
+        api_key=openrouter_data.get("api_key") or agent_data.get("api_key"),
+        api_base=openrouter_data.get("api_base", "https://openrouter.ai/api/v1"),
+    )
+    ollama_cfg = OllamaConfig(
+        api_base=ollama_data.get("api_base", "http://localhost:11434"),
+        api_key=ollama_data.get("api_key"),
+        timeout=float(ollama_data.get("timeout", 60.0)),
+    )
+    default_provider = str(providers_data.get("default", "")).strip().lower()
+    if not default_provider:
+        default_provider = "ollama" if str(agent_data.get("model", "")).startswith("ollama/") else "openrouter"
+
+    providers_cfg = ProvidersConfig(
+        default=default_provider,
+        openrouter=openrouter_cfg,
+        ollama=ollama_cfg,
+    )
 
     agent_cfg = AgentConfig(
         model=agent_data.get("model", "openrouter/anthropic/claude-sonnet-4.5"),
@@ -127,7 +214,7 @@ def load_config(
     )
 
     keeper_cfg = KeeperConfig(
-        model_name=keeper_data.get("model_name", "smollm2-135m"),
+        model_name=keeper_data.get("model_name", "qwen3-0.6b"),
         model_path=keeper_data.get("model_path"),
         model_repo=keeper_data.get("model_repo"),
         model_file=keeper_data.get("model_file"),
@@ -148,6 +235,10 @@ def load_config(
         max_turns=behavior_data.get("max_turns", 50),
         history_budget=behavior_data.get("history_budget", 16000),
         cache_ttl=behavior_data.get("cache_ttl", 300),
+        subagent_enabled=behavior_data.get("subagent_enabled", True),
+        max_concurrent_subagents=behavior_data.get("max_concurrent_subagents", 3),
+        max_subagent_turns=behavior_data.get("max_subagent_turns", 15),
+        subagent_cloud_model=behavior_data.get("subagent_cloud_model", ""),
     )
 
     # Parse bash config
@@ -171,6 +262,23 @@ def load_config(
         max_tools=int(mcp_data.get("max_tools", 50)),
     )
 
+    # Parse Web config
+    web_data = cfg_data.get("web", {})
+    web_cfg = WebConfig(
+        search_provider=web_data.get("search_provider", "auto"),
+        tavily_api_key=web_data.get("tavily_api_key"),
+        brave_api_key=web_data.get("brave_api_key"),
+        searxng_url=web_data.get("searxng_url"),
+        max_search_results=int(web_data.get("max_search_results", 5)),
+        fetch_max_chars=int(web_data.get("fetch_max_chars", 20_000)),
+        timeout=float(web_data.get("timeout", 15.0)),
+        user_agent=web_data.get(
+            "user_agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (compatible; ISLI-Coder/0.1)",
+        ),
+    )
+
     # Parse permission rules from [[permissions.rules]] or [permissions].rules
     raw_rules = perm_data.get("rules", [])
     parsed_rules = []
@@ -192,12 +300,26 @@ def load_config(
     )
 
     # Tier 3: Environment variables
+    if os.getenv("ISLI_PROVIDER"):
+        providers_cfg.default = os.environ["ISLI_PROVIDER"].lower()
+    if os.getenv("OLLAMA_API_BASE"):
+        providers_cfg.ollama.api_base = os.environ["OLLAMA_API_BASE"]
+    elif os.getenv("OLLAMA_HOST"):
+        host = os.environ["OLLAMA_HOST"]
+        if not host.startswith("http://") and not host.startswith("https://"):
+            host = f"http://{host}"
+        providers_cfg.ollama.api_base = host
+    if os.getenv("OLLAMA_API_KEY"):
+        providers_cfg.ollama.api_key = os.environ["OLLAMA_API_KEY"]
+
     if os.getenv("ISLI_MODEL"):
         agent_cfg.model = os.environ["ISLI_MODEL"]
     if os.getenv("ISLI_API_KEY"):
         agent_cfg.api_key = os.environ["ISLI_API_KEY"]
-    elif os.getenv("OPENROUTER_API_KEY") and not agent_cfg.api_key:
-        agent_cfg.api_key = os.environ["OPENROUTER_API_KEY"]
+    elif os.getenv("OPENROUTER_API_KEY"):
+        providers_cfg.openrouter.api_key = os.environ["OPENROUTER_API_KEY"]
+        if not agent_cfg.api_key:
+            agent_cfg.api_key = os.environ["OPENROUTER_API_KEY"]
     elif os.getenv("ANTHROPIC_API_KEY") and not agent_cfg.api_key:
         agent_cfg.api_key = os.environ["ANTHROPIC_API_KEY"]
     elif os.getenv("OPENAI_API_KEY") and not agent_cfg.api_key:
@@ -214,8 +336,21 @@ def load_config(
     if os.getenv("ISLI_MODE"):
         permissions_cfg.default_mode = os.environ["ISLI_MODE"]
 
+    if os.getenv("TAVILY_API_KEY") and not web_cfg.tavily_api_key:
+        web_cfg.tavily_api_key = os.environ["TAVILY_API_KEY"]
+    if os.getenv("BRAVE_API_KEY") and not web_cfg.brave_api_key:
+        web_cfg.brave_api_key = os.environ["BRAVE_API_KEY"]
+    if os.getenv("SEARXNG_URL") and not web_cfg.searxng_url:
+        web_cfg.searxng_url = os.environ["SEARXNG_URL"]
+    if os.getenv("ISLI_WEB_SEARCH_PROVIDER"):
+        web_cfg.search_provider = os.environ["ISLI_WEB_SEARCH_PROVIDER"]
+
     # Tier 4: Direct programmatic overrides
     if overrides:
+        if "provider" in overrides:
+            providers_cfg.default = str(overrides["provider"]).lower()
+        if "ollama_host" in overrides:
+            providers_cfg.ollama.api_base = str(overrides["ollama_host"])
         if "model" in overrides:
             agent_cfg.model = overrides["model"]
         if "api_key" in overrides:
@@ -233,6 +368,28 @@ def load_config(
         if "mode" in overrides:
             permissions_cfg.default_mode = overrides["mode"]
 
+    # Align agent_cfg credentials and endpoint with active model
+    if agent_cfg.model.startswith("ollama/"):
+        providers_cfg.default = "ollama"
+        agent_cfg.api_base = providers_cfg.ollama.api_base
+        agent_cfg.api_key = providers_cfg.ollama.api_key
+    elif agent_cfg.model.startswith("openrouter/"):
+        providers_cfg.default = "openrouter"
+        if not agent_cfg.api_key and providers_cfg.openrouter.api_key:
+            agent_cfg.api_key = providers_cfg.openrouter.api_key
+
+    # Parse Skills config
+    skills_data = cfg_data.get("skills", {})
+    skills_cfg = SkillsConfig(
+        enabled=bool(skills_data.get("enabled", True)),
+        allow_scripts=bool(skills_data.get("allow_scripts", True)),
+        default_scope=str(skills_data.get("default_scope", "user")),
+        script_timeout=int(skills_data.get("script_timeout", 120)),
+        max_index_items=int(skills_data.get("max_index_items", 30)),
+        max_skills=int(skills_data.get("max_skills", 100)),
+        subagent_untrusted_tools=bool(skills_data.get("subagent_untrusted_tools", False)),
+    )
+
     return Config(
         agent=agent_cfg,
         keeper=keeper_cfg,
@@ -240,6 +397,9 @@ def load_config(
         permissions=permissions_cfg,
         bash=bash_cfg,
         mcp=mcp_cfg,
+        web=web_cfg,
+        skills=skills_cfg,
+        providers=providers_cfg,
     )
 
 
@@ -336,6 +496,50 @@ def save_global_config(config: Config) -> None:
             "max_tools": config.mcp.max_tools,
         }
     )
+
+    web_section = data.setdefault("web", {})
+    web_section.update(
+        {
+            "search_provider": config.web.search_provider,
+            "max_search_results": config.web.max_search_results,
+            "fetch_max_chars": config.web.fetch_max_chars,
+            "timeout": config.web.timeout,
+        }
+    )
+    if config.web.tavily_api_key:
+        web_section["tavily_api_key"] = config.web.tavily_api_key
+    if config.web.brave_api_key:
+        web_section["brave_api_key"] = config.web.brave_api_key
+    if config.web.searxng_url:
+        web_section["searxng_url"] = config.web.searxng_url
+
+    skills_section = data.setdefault("skills", {})
+    skills_section.update(
+        {
+            "enabled": config.skills.enabled,
+            "allow_scripts": config.skills.allow_scripts,
+            "default_scope": config.skills.default_scope,
+            "script_timeout": config.skills.script_timeout,
+            "max_index_items": config.skills.max_index_items,
+            "max_skills": config.skills.max_skills,
+            "subagent_untrusted_tools": config.skills.subagent_untrusted_tools,
+        }
+    )
+
+    providers_section = data.setdefault("providers", {})
+    providers_section["default"] = config.providers.default
+
+    openrouter_sec = providers_section.setdefault("openrouter", {})
+    if config.providers.openrouter.api_key:
+        openrouter_sec["api_key"] = config.providers.openrouter.api_key
+    if config.providers.openrouter.api_base:
+        openrouter_sec["api_base"] = config.providers.openrouter.api_base
+
+    ollama_sec = providers_section.setdefault("ollama", {})
+    ollama_sec["api_base"] = config.providers.ollama.api_base
+    if config.providers.ollama.api_key:
+        ollama_sec["api_key"] = config.providers.ollama.api_key
+    ollama_sec["timeout"] = config.providers.ollama.timeout
 
     if tomli_w is not None:
         cfg_file.write_text(tomli_w.dumps(data), encoding="utf-8")

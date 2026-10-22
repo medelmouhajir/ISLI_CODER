@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from unittest.mock import MagicMock
 
 from prompt_toolkit.document import Document
@@ -283,3 +284,94 @@ def test_tui_input_unlocked_and_queuing(tmp_path: Path) -> None:
     assert tui.cancel_event.is_set()
     assert active_cancel.is_set()
     assert len(tui._pending_prompts) == 0
+
+
+# -- 8. Ask User Modal & Interactive Shortcuts ------------------------
+
+
+def test_ask_user_modal_rendering_and_shortcuts(tmp_path: Path) -> None:
+    config = MagicMock()
+    config.agent.model = "gpt-4o"
+    loop = MagicMock()
+    commands = MagicMock()
+    session_mgr = MagicMock()
+
+    tui = IsliTui(config, loop, commands, session_mgr, tmp_path)
+    result: dict[str, Any] = {}
+    done = threading.Event()
+
+    tui._open_ask_user_modal(
+        question="Which database to use?",
+        options=["PostgreSQL", "SQLite"],
+        context="Setting up storage layer",
+        result=result,
+        done=done,
+    )
+
+    # 1. Options include predefined + custom write-in
+    assert "PostgreSQL" in tui._modal_options
+    assert "SQLite" in tui._modal_options
+    assert "[Other] Type a custom response..." in tui._modal_options
+
+    # 2. Tokens include numbered prefixes
+    tokens = tui._ask_user_tokens()
+    rendered = "".join(text for _, text in tokens)
+    assert "[1] " in rendered
+    assert "[2] " in rendered
+    assert "Which database to use?" in rendered
+
+    # 3. Simulate digit '1' key press
+    digit_1_binding = [
+        b for b in tui._modal_control.key_bindings.get_bindings_for_keys(("1",))
+        if b.keys == ("1",)
+    ][0]
+    digit_1_binding.handler(MagicMock())
+
+    assert done.is_set()
+    assert result.get("choice") == "PostgreSQL"
+    assert result.get("answer") == "PostgreSQL"
+
+
+def test_ask_user_custom_response_mode(tmp_path: Path) -> None:
+    config = MagicMock()
+    config.agent.model = "gpt-4o"
+    loop = MagicMock()
+    commands = MagicMock()
+    session_mgr = MagicMock()
+
+    tui = IsliTui(config, loop, commands, session_mgr, tmp_path)
+    result: dict[str, Any] = {}
+    done = threading.Event()
+
+    tui._open_ask_user_modal(
+        question="Which port?",
+        options=["8000", "8080"],
+        context=None,
+        result=result,
+        done=done,
+    )
+
+    # Option 3 is '[Other] Type a custom response...'
+    digit_3_binding = [
+        b for b in tui._modal_control.key_bindings.get_bindings_for_keys(("3",))
+        if b.keys == ("3",)
+    ][0]
+    digit_3_binding.handler(MagicMock())
+
+    # Should switch to custom mode
+    assert tui._modal_custom_mode is True
+    assert not done.is_set()
+
+    # Type '9' '0' '0' '0'
+    tui._modal_custom_text = "9000"
+
+    # Press Enter
+    enter_binding = [
+        b for b in tui._modal_control.key_bindings.bindings
+        if getattr(b.handler, "__name__", "") == "_enter"
+    ][0]
+    enter_binding.handler(MagicMock())
+
+    assert done.is_set()
+    assert result.get("answer") == "9000"
+

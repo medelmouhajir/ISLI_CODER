@@ -17,8 +17,21 @@ def test_slash_command_completer_all():
     assert "/cost" in cmd_names
     assert "/pwd" in cmd_names
     assert "/clear" in cmd_names
+    assert "/state" in cmd_names
+    assert "/health" in cmd_names
     assert "/help" in cmd_names
     assert "/exit" in cmd_names
+
+
+def test_slash_command_completer_state_subcommands():
+    completer = SlashCommandCompleter()
+    doc = Document("/state ")
+    completions = list(completer.get_completions(doc, None))
+    subs = [c.text for c in completions]
+    assert "summary" in subs
+    assert "failures" in subs
+    assert "assumptions" in subs
+    assert "reset" in subs
 
 
 def test_slash_command_completer_prefix_filter():

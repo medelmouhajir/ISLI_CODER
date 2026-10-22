@@ -6,6 +6,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
+from rich.table import Table
 
 if TYPE_CHECKING:
     from isli.config import Config
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
     from isli.engine.react_loop import ReActLoop
     from isli.engine.tool_engine import ToolEngine
     from isli.memory.session import SessionManager
+    from isli.skills.registry import SkillRegistry
     from isli.utils.permissions import PermissionGate
 
 COMMAND_HELP = """
@@ -22,6 +24,7 @@ COMMAND_HELP = """
 
 [bold yellow]Workspace & Context:[/bold yellow]
   [green]/pwd[/green]               Display current working directory, git branch, and stats
+  [green]/tree[/green]              Display global minimal view tree of the workspace
   [green]/memory[/green]            View project instructions from ISLI.md
   [green]/tasks[/green]             View and manage plan tasks (alias: /todo)
 
@@ -34,7 +37,8 @@ COMMAND_HELP = """
   [green]/loop resume[/green]       Resume paused recurring loop
 
 [bold yellow]Model & Intelligence:[/bold yellow]
-  [green]/model [name/#][/green]     Show active cloud model, list top 25 models, or switch
+  [green]/provider [name][/green]   Show active provider (ollama/openrouter) or switch
+  [green]/model [name/#][/green]     Show active model, list available models, or switch
   [green]/keeper [name][/green]      Show active Keeper model or switch local model
   [green]/cost[/green]              Display cumulative token expenditure and USD cost
   [green]/cache[/green]             Display Keeper semantic cache statistics & savings
@@ -45,11 +49,13 @@ COMMAND_HELP = """
   [green]/save [name][/green]       Save the current conversation snapshot
   [green]/load <name>[/green]       Load a previous conversation session
   [green]/sessions[/green]          List all saved conversation sessions
+  [green]/state [sub][/green]        Display execution state, ground truths, and health (alias: /health)
 
 [bold yellow]System & Security:[/bold yellow]
   [green]/mode [name][/green]        Show or switch permission mode (normal/plan/auto/robot)
   [green]/config[/green]            Show active runtime configuration
   [green]/permissions[/green]       Display tool approval security rules and overrides
+  [green]/skills [action][/green]   Manage reusable skills and tools (list/show/trust/rm/mv/reload)
   [green]/mcp [action][/green]      Manage MCP servers (list/add/remove/get/reload/tools/resources/prompts/run-prompt)
   [green]/help[/green]              Show this help menu
   [green]/exit[/green]              Exit the ISLI CLI
@@ -71,6 +77,7 @@ class CommandHandler:
         planner: Any = None,
         loop_scheduler: LoopScheduler | None = None,
         react_loop: ReActLoop | None = None,
+        skill_registry: Any | None = None,
     ) -> None:
         self.config = config
         self.agent = agent
@@ -82,6 +89,7 @@ class CommandHandler:
         self.planner = planner
         self.loop_scheduler = loop_scheduler
         self.react_loop = react_loop
+        self.skill_registry = skill_registry
         self.loop_runner: Any = None
         self.console = Console()
 
@@ -101,83 +109,261 @@ class CommandHandler:
         if cmd == "/help":
             return COMMAND_HELP
 
+        if cmd == "/provider":
+            from isli.config import save_global_config
+            from isli.engine.providers import check_ollama_status, check_openrouter_status
+
+            sub = arg.strip().lower() if arg else ""
+            if sub in {"1", "ollama"}:
+                sub = "ollama"
+            elif sub in {"2", "openrouter"}:
+                sub = "openrouter"
+
+            if sub in {"ollama", "openrouter"}:
+                self.config.providers.default = sub
+                saved_hint = ""
+                if sub == "ollama" and not self.agent.config.model.startswith("ollama/"):
+                    from isli.engine.model_catalog import get_top_ollama_models
+
+                    top_ol = get_top_ollama_models(
+                        api_base=self.config.providers.ollama.api_base, limit=1
+                    )
+                    if top_ol:
+                        self.agent.config.model = top_ol[0].id
+                        self.config.agent.model = top_ol[0].id
+                        self.agent.config.api_base = self.config.providers.ollama.api_base
+                        self.agent.config.api_key = self.config.providers.ollama.api_key
+                elif sub == "openrouter" and not self.agent.config.model.startswith("openrouter/"):
+                    self.agent.config.model = "openrouter/anthropic/claude-sonnet-4.5"
+                    self.config.agent.model = "openrouter/anthropic/claude-sonnet-4.5"
+                    self.agent.config.api_key = (
+                        self.config.providers.openrouter.api_key or self.config.agent.api_key
+                    )
+                    self.agent.config.api_base = self.config.providers.openrouter.api_base
+
+                if hasattr(self.session_manager, "set_model"):
+                    self.session_manager.set_model(self.agent.config.model)
+
+                try:
+                    save_global_config(self.config)
+                    saved_hint = " (saved to ~/.isli/config.toml)"
+                except Exception:
+                    pass
+                return (
+                    f"[green]Switched active provider to:[/green] [bold]{sub.upper()}[/bold]{saved_hint}\n"
+                    f"[dim]Active model: {self.agent.config.model}[/dim]"
+                )
+
+            # Display status of all providers
+            ol_status = check_ollama_status(api_base=self.config.providers.ollama.api_base)
+            or_status = check_openrouter_status(
+                api_key=self.config.providers.openrouter.api_key or self.config.agent.api_key
+            )
+
+            cur_p = self.config.providers.default.lower()
+            ol_active = (
+                " [green]<-- active[/green]"
+                if cur_p == "ollama" or self.agent.config.model.startswith("ollama/")
+                else ""
+            )
+            or_active = (
+                " [green]<-- active[/green]"
+                if cur_p == "openrouter" and not self.agent.config.model.startswith("ollama/")
+                else ""
+            )
+
+            ol_detail = (
+                f"[green]Connected[/green] ({ol_status['model_count']} local model(s) detected)"
+                if ol_status["available"]
+                else f"[yellow]Offline[/yellow] ({ol_status.get('error') or 'unreachable'})"
+            )
+            or_detail = (
+                "[green]Configured[/green] (API key present)"
+                if or_status["configured"]
+                else "[yellow]No API key configured[/yellow]"
+            )
+
+            lines = [
+                "[bold cyan]LLM Providers:[/bold cyan]\n",
+                f"  1. [bold yellow]Ollama[/bold yellow]       (Local & Cloud models){ol_active}",
+                f"     Endpoint: [white]{self.config.providers.ollama.api_base}[/white]",
+                f"     Status:   {ol_detail}\n",
+                f"  2. [bold yellow]OpenRouter[/bold yellow]   (Cloud aggregator: Claude, GPT, Gemini, Qwen){or_active}",
+                f"     Endpoint: [white]{self.config.providers.openrouter.api_base}[/white]",
+                f"     Status:   {or_detail}\n",
+                f"[bold cyan]Active Brain:[/bold cyan] [green]{self.agent.config.model}[/green]\n",
+                "[dim]To switch provider, run:[/dim] [bold green]/provider 1[/bold green] (Ollama) "
+                "[dim]or[/dim] [bold green]/provider 2[/bold green] (OpenRouter)\n"
+                "[dim]To browse and switch models across providers, run:[/dim] [bold green]/model[/bold green]",
+            ]
+            return "\n".join(lines)
+
         if cmd == "/model":
             from isli.config import save_global_config
-            from isli.engine.model_catalog import get_top_openrouter_models
+            from isli.engine.model_catalog import get_top_ollama_models, get_top_openrouter_models
 
-            models = get_top_openrouter_models(limit=25)
+            ollama_models = get_top_ollama_models(
+                api_base=self.config.providers.ollama.api_base, limit=15
+            )
+            openrouter_models = get_top_openrouter_models(limit=15)
+
+            is_ollama_active = (
+                self.config.providers.default == "ollama"
+                or self.agent.config.model.startswith("ollama/")
+            )
+
+            if is_ollama_active:
+                primary_models = ollama_models
+                secondary_models = openrouter_models
+                primary_title = "Ollama Models (Local & Cloud):"
+                secondary_title = "Available Top Models from OpenRouter:"
+            else:
+                primary_models = openrouter_models
+                secondary_models = ollama_models
+                primary_title = "Available Top Models from OpenRouter:"
+                secondary_title = "Ollama Models (Local & Cloud):"
+
+            all_models = primary_models + secondary_models
 
             if arg:
                 selected_model = arg.strip()
                 # Check if user selected by index number
                 if selected_model.isdigit():
                     idx = int(selected_model) - 1
-                    if 0 <= idx < len(models):
-                        selected_model = models[idx].id
+                    if 0 <= idx < len(all_models):
+                        selected_model = all_models[idx].id
                     else:
                         return (
                             f"[red]Invalid model index {selected_model}. "
-                            f"Enter a number from 1 to {len(models)}.[/red]"
+                            f"Enter a number from 1 to {len(all_models)}.[/red]"
                         )
-                elif (
-                    "/" in selected_model
-                    and not selected_model.startswith("openrouter/")
-                    and not any(
-                        selected_model.startswith(p)
-                        for p in ["ollama/", "openai/", "anthropic/", "gemini/"]
-                    )
-                ):
-                    selected_model = f"openrouter/{selected_model}"
+                else:
+                    # Match by name or apply provider prefix
+                    lower_sel = selected_model.lower()
+                    matched = False
+                    for m in all_models:
+                        if lower_sel in {m.id.lower(), m.name.lower(), m.id.split('/')[-1].lower()}:
+                            selected_model = m.id
+                            matched = True
+                            break
+                    if not matched:
+                        if (
+                            "/" in selected_model
+                            and not selected_model.startswith("openrouter/")
+                            and not any(
+                                selected_model.startswith(p)
+                                for p in ["ollama/", "openai/", "anthropic/", "gemini/"]
+                            )
+                        ):
+                            if self.config.providers.default == "ollama":
+                                selected_model = f"ollama/{selected_model}"
+                            else:
+                                selected_model = f"openrouter/{selected_model}"
 
                 self.agent.config.model = selected_model
                 self.config.agent.model = selected_model
+                if selected_model.startswith("ollama/"):
+                    self.config.providers.default = "ollama"
+                    self.agent.config.api_base = self.config.providers.ollama.api_base
+                    self.agent.config.api_key = self.config.providers.ollama.api_key
+                elif selected_model.startswith("openrouter/"):
+                    self.config.providers.default = "openrouter"
+                    self.agent.config.api_key = (
+                        self.config.providers.openrouter.api_key or self.config.agent.api_key
+                    )
+                    self.agent.config.api_base = self.config.providers.openrouter.api_base
+
+                if hasattr(self.session_manager, "set_model"):
+                    self.session_manager.set_model(self.agent.config.model)
+
                 try:
                     save_global_config(self.config)
                     saved_hint = " (saved to ~/.isli/config.toml)"
                 except Exception:
                     saved_hint = ""
 
-                return f"[green]Switched cloud LLM model to:[/green] {selected_model}{saved_hint}"
+                prov_badge = "OLLAMA" if selected_model.startswith("ollama/") else "OPENROUTER"
+                return f"[green]Switched cloud LLM model to:[/green] {selected_model} ([bold yellow]{prov_badge}[/bold yellow]){saved_hint}"
 
-            # If no arg, display current model and top 20+ models from OpenRouter
+            # If no arg, display current model and partitioned lists (active provider first)
+            prov_label = "OLLAMA" if self.agent.config.model.startswith("ollama/") else "OPENROUTER"
             lines = [
-                f"[bold cyan]Current Cloud LLM Model:[/bold cyan] "
-                f"[green]{self.agent.config.model}[/green]\n",
-                "[bold cyan]Available Top Models from OpenRouter:[/bold cyan]",
-                " [bold]#   Provider    Model ID                                      "
+                f"[bold cyan]Current LLM Brain:[/bold cyan] "
+                f"[green]{self.agent.config.model}[/green] [dim]({prov_label})[/dim]\n",
+                f"[bold cyan]{primary_title}[/bold cyan]",
+                " [bold]#   Provider/Status   Model ID                                      "
                 "Context   Price/1M (In/Out)[/bold]",
-                " --  ----------  --------------------------------------------  "
+                " --  ----------------  --------------------------------------------  "
                 "--------  ------------------",
             ]
 
-            for i, m in enumerate(models, 1):
-                ctx_k = (
-                    f"{m.context_length // 1000}k"
-                    if m.context_length >= 1000
-                    else f"{m.context_length}"
-                )
-                price_str = f"${m.prompt_price:.2f} / ${m.completion_price:.2f}"
+            curr_idx = 1
+            for m in primary_models:
+                ctx_k = f"{m.context_length // 1000}k" if m.context_length >= 1000 else f"{m.context_length}"
+                if m.provider.lower() == "ollama":
+                    badge_str = f"[green]Local {m.size_str}[/green]" if m.is_local else "[dim]Cloud[/dim]"
+                    price_str = "Free              "
+                else:
+                    badge_str = f"[yellow]{m.provider:16s}[/yellow]"
+                    price_str = f"${m.prompt_price:.2f} / ${m.completion_price:.2f}"
                 is_active = " [green]<-- active[/green]" if m.id == self.agent.config.model else ""
                 lines.append(
-                    f" {i:2d}. [yellow]{m.provider:10s}[/yellow] {m.id:44s}  "
-                    f"{ctx_k:8s}  {price_str:16s}{is_active}"
+                    f" {curr_idx:2d}. {badge_str:26s} {m.id:44s}  "
+                    f"{ctx_k:8s}  {price_str:18s}{is_active}"
                 )
+                curr_idx += 1
+
+            lines.extend(
+                [
+                    "",
+                    f"[bold cyan]{secondary_title}[/bold cyan]",
+                    " [bold]#   Provider/Status   Model ID                                      "
+                    "Context   Price/1M (In/Out)[/bold]",
+                    " --  ----------------  --------------------------------------------  "
+                    "--------  ------------------",
+                ]
+            )
+
+            for m in secondary_models:
+                ctx_k = f"{m.context_length // 1000}k" if m.context_length >= 1000 else f"{m.context_length}"
+                if m.provider.lower() == "ollama":
+                    badge_str = f"[green]Local {m.size_str}[/green]" if m.is_local else "[dim]Cloud[/dim]"
+                    price_str = "Free              "
+                else:
+                    badge_str = f"[yellow]{m.provider:16s}[/yellow]"
+                    price_str = f"${m.prompt_price:.2f} / ${m.completion_price:.2f}"
+                is_active = " [green]<-- active[/green]" if m.id == self.agent.config.model else ""
+                lines.append(
+                    f" {curr_idx:2d}. {badge_str:26s} {m.id:44s}  "
+                    f"{ctx_k:8s}  {price_str:18s}{is_active}"
+                )
+                curr_idx += 1
 
             lines.append(
                 "\n[dim]To select a model, run:[/dim] [bold green]/model <number>[/bold green] "
-                "[dim]or[/dim] [bold green]/model <model_id>[/bold green]"
+                "[dim]or[/dim] [bold green]/model <model_id>[/bold green]\n"
+                "[dim]To toggle active provider, run:[/dim] [bold green]/provider ollama[/bold green] [dim]or[/dim] [bold green]/provider openrouter[/bold green]"
             )
             return "\n".join(lines)
 
         if cmd == "/keeper":
             if arg:
-                self.keeper.config.model_name = arg
+                selected_model = arg.strip()
+                self.keeper.config.model_name = selected_model
+                self.config.keeper.model_name = selected_model
                 self.keeper.unload()
                 try:
                     self.keeper.load()
-                    return f"[green]Switched Keeper model to:[/green] {arg} (loaded)"
+                    from isli.config import save_global_config
+
+                    try:
+                        save_global_config(self.config)
+                        saved_hint = " (saved to ~/.isli/config.toml)"
+                    except Exception:
+                        saved_hint = ""
+                    return f"[green]Switched Keeper model to:[/green] {selected_model} (loaded){saved_hint}"
                 except Exception as e:
-                    return f"[yellow]Switched Keeper model to {arg}, but load failed:[/yellow] {e}"
+                    return f"[yellow]Switched Keeper model to {selected_model}, but load failed:[/yellow] {e}"
             status = "ready" if self.keeper.available else "idle/unloaded"
             usage = self.keeper.usage_summary()
             dev_str = usage.get("device", "CPU (RAM)")
@@ -199,10 +385,23 @@ class CommandHandler:
         if cmd == "/clear":
             self.session_manager.clear()
             self.session_manager.start_new(model=self.agent.config.model)
+            if self.react_loop and getattr(self.react_loop, "context_manager", None):
+                self.react_loop.context_manager.reset()
             if hasattr(self.agent, "last_turn_prompt_tokens"):
                 self.agent.last_turn_prompt_tokens = 0
                 self.agent.last_turn_completion_tokens = 0
             return "[green]Conversation cleared. Started fresh session.[/green]"
+
+        if cmd == "/tree":
+            from pathlib import Path
+            from isli.engine.workspace_tree import generate_workspace_tree
+
+            root = Path.cwd().resolve()
+            if self.tool_engine and hasattr(self.tool_engine, "project_root"):
+                root = self.tool_engine.project_root.resolve()
+            max_lines = getattr(self.config.behavior, "tree_max_lines", 50)
+            tree_text = generate_workspace_tree(root, max_lines=max_lines)
+            return f"[bold cyan]Workspace View Tree:[/bold cyan]\n[green]{tree_text}[/green]"
 
         if cmd == "/compact":
             from isli.memory.compaction import compact_history
@@ -300,13 +499,49 @@ class CommandHandler:
             p_tok = summary["prompt_tokens"]
             c_tok = summary["completion_tokens"]
             cost = summary["estimated_cost_usd"]
-            return (
-                f"[bold cyan]Token Expenditure & Cost Breakdown:[/bold cyan]\n"
-                f"  |-- Prompt Tokens:     [bold white]{p_tok:,}[/bold white]\n"
-                f"  |-- Completion Tokens: [bold white]{c_tok:,}[/bold white]\n"
-                f"  |-- Total Tokens:      [bold green]{total:,}[/bold green]\n"
-                f"  +-- Estimated Cost:    [bold yellow]${cost:.4f} USD[/bold yellow]"
-            )
+
+            cached_tok = summary.get("cached_tokens", 0)
+            sub_cached_tok = summary.get("subagent_cached_tokens", 0)
+
+            sub_runs = summary.get("subagent_task_runs", [])
+            if not sub_runs:
+                cached_line = f"  |-- Cached Tokens:     [bold green]{cached_tok:,}[/bold green]\n" if cached_tok > 0 else ""
+                return (
+                    f"[bold cyan]Token Expenditure & Cost Breakdown:[/bold cyan]\n"
+                    f"  |-- Prompt Tokens:     [bold white]{p_tok:,}[/bold white]\n"
+                    f"{cached_line}"
+                    f"  |-- Completion Tokens: [bold white]{c_tok:,}[/bold white]\n"
+                    f"  |-- Total Tokens:      [bold green]{total:,}[/bold green]\n"
+                    f"  +-- Estimated Cost:    [bold yellow]${cost:.4f} USD[/bold yellow]"
+                )
+
+            parent_total = summary.get("parent_total_tokens", p_tok + c_tok)
+            parent_cost = summary.get("parent_cost_usd", 0.0)
+            sub_total = summary.get("subagent_total_tokens", 0)
+            sub_p_tok = summary.get("subagent_prompt_tokens", 0)
+            sub_c_tok = summary.get("subagent_completion_tokens", 0)
+            sub_cost = summary.get("subagent_cost_usd", 0.0)
+
+            lines = [
+                "[bold cyan]Token Expenditure & Cost Breakdown:[/bold cyan]",
+                "  |-- [bold]Parent Orchestrator:[/bold]",
+                f"  |   |-- Prompt Tokens:     [white]{p_tok:,}[/white]" + (f" ([green]{cached_tok:,} cached[/green])" if cached_tok > 0 else ""),
+                f"  |   |-- Completion Tokens: [white]{c_tok:,}[/white]",
+                f"  |   +-- Subtotal:          [yellow]${parent_cost:.4f} USD[/yellow] ({parent_total:,} tok)",
+                f"  |-- [bold]Subagents ({len(sub_runs)} worker run{'s' if len(sub_runs) != 1 else ''}):[/bold]",
+                f"  |   |-- Prompt Tokens:     [white]{sub_p_tok:,}[/white]" + (f" ([green]{sub_cached_tok:,} cached[/green])" if sub_cached_tok > 0 else ""),
+                f"  |   |-- Completion Tokens: [white]{sub_c_tok:,}[/white]",
+                f"  |   +-- Subtotal:          [yellow]${sub_cost:.4f} USD[/yellow] ({sub_total:,} tok)",
+            ]
+            for r in sub_runs[:5]:
+                desc = r.get("description", "Subagent task")[:40]
+                lines.append(f"  |       * {desc}: {r.get('total_tokens', 0):,} tok (${r.get('cost_usd', 0.0):.4f})")
+            if len(sub_runs) > 5:
+                lines.append(f"  |       * ... (+{len(sub_runs) - 5} more runs)")
+            lines.extend([
+                f"  +-- [bold green]Combined Total:        {total:,} tokens (${cost:.4f} USD)[/bold green]"
+            ])
+            return "\n".join(lines)
 
         if cmd == "/cache":
             if self.tool_engine and hasattr(self.tool_engine, "cache"):
@@ -321,7 +556,12 @@ class CommandHandler:
             return "[yellow]Cache stats not available.[/yellow]"
 
         if cmd == "/mode":
-            from isli.ui.prompts import MODE_INFO, select_mode_interactive
+            from isli.ui.prompts import (
+                MODE_INFO,
+                is_full_screen_tui_active,
+                is_interactive_tty,
+                select_mode_interactive,
+            )
             from isli.utils.permissions import Mode
 
             if arg:
@@ -341,11 +581,12 @@ class CommandHandler:
                     )
                 return f"[green]Switched permission mode to:[/green] [bold]{new_mode.value}[/bold]"
 
-            # No arg: interactive selector in TTY, text list otherwise
-            selected = select_mode_interactive(self.permission_gate.mode)
-            if selected is not None:
-                self.permission_gate.set_mode(selected)
-                return f"[green]Switched permission mode to:[/green] [bold]{selected.value}[/bold]"
+            # Interactive selector only in standalone REPL outside full-screen TUI
+            if not is_full_screen_tui_active() and is_interactive_tty():
+                selected = select_mode_interactive(self.permission_gate.mode)
+                if selected is not None:
+                    self.permission_gate.set_mode(selected)
+                    return f"[green]Switched permission mode to:[/green] [bold]{selected.value}[/bold]"
             lines = [
                 f"[bold cyan]Permission Mode:[/bold cyan] "
                 f"[bold]{self.permission_gate.mode.value}[/bold]\n"
@@ -373,9 +614,10 @@ class CommandHandler:
                 k_en = f"enabled, {dev}"
             else:
                 k_en = "disabled"
+            prov = "OLLAMA" if self.agent.config.model.startswith("ollama/") else "OPENROUTER"
             return (
                 f"[bold cyan]Active Runtime Configuration:[/bold cyan]\n"
-                f"  |-- Cloud LLM Brain:   [green]{self.agent.config.model}[/green]\n"
+                f"  |-- LLM Brain:         [green]{self.agent.config.model}[/green] ([bold yellow]{prov}[/bold yellow])\n"
                 f"  |-- Local Keeper SLM:  [yellow]{k_model}[/yellow] ({k_en})\n"
                 f"  |-- Max Turns:         "
                 f"[bold white]{self.config.behavior.max_turns}[/bold white]\n"
@@ -431,16 +673,80 @@ class CommandHandler:
         if cmd in {"/tasks", "/todo"}:
             return self._handle_tasks(arg)
 
+        if cmd in {"/state", "/health"}:
+            return self._handle_state(arg)
+
         if cmd == "/loop":
             return self._handle_loop(arg)
 
         if cmd == "/mcp":
             return self._handle_mcp(arg)
 
+        if cmd == "/skills":
+            return self._handle_skills(arg)
+
         if cmd == "/exit":
             raise SystemExit(0)
 
         return f"[yellow]Unknown slash command '{cmd}'. Type /help for available commands.[/yellow]"
+
+    def _handle_state(self, arg: str = "") -> Any:
+        """Display the active execution state and reliability diagnostics."""
+        from isli.ui.prompts import render_execution_state_panel
+
+        sub = arg.strip().lower() if arg else ""
+
+        if sub == "reset":
+            if self.react_loop is not None:
+                self.react_loop.active_state = None
+                return "[green]Execution state and goal contract have been reset.[/green]"
+            return "[dim]No active agent loop to reset.[/dim]"
+
+        state = getattr(self.react_loop, "active_state", None) if self.react_loop else None
+        if not state:
+            return "[dim]No active execution state. Run a query first to inspect state.[/dim]"
+
+        if not sub or sub == "full":
+            return render_execution_state_panel(state)
+
+        if sub == "summary":
+            goal = state.goal.objective or "(No explicit goal set)"
+            acc_count = len(state.verified_facts) + len(state.modified_files)
+            fail_count = len(state.failures)
+            stuck_tier = state.stuck_state.recovery_tier
+            is_stuck_str = "[bold red]Yes[/bold red]" if state.stuck_state.is_stuck else "[green]No[/green]"
+            return (
+                f"[bold cyan]Execution State Summary:[/bold cyan]\n"
+                f"  • [bold]Goal:[/bold] {goal}\n"
+                f"  • [bold]Verified Accomplishments:[/bold] {acc_count}\n"
+                f"  • [bold]Failures Logged:[/bold] {fail_count}\n"
+                f"  • [bold]Recovery Tier:[/bold] Tier {stuck_tier} ({'Normal' if stuck_tier == 0 else 'Active Recovery'})\n"
+                f"  • [bold]Stuck:[/bold] {is_stuck_str}"
+            )
+
+        if sub == "failures":
+            if not state.failures:
+                return "[green]No tool failures logged in the current execution state.[/green]"
+            lines = [
+                f"[bold cyan]Failure Tracker Diagnostics ({len(state.failures)} total, {state.stuck_state.consecutive_failures} consecutive):[/bold cyan]"
+            ]
+            for rec in state.failures:
+                cat_val = rec.category.value if hasattr(rec.category, "value") else str(rec.category)
+                lines.append(f"  • [bold yellow]{cat_val}:[/bold yellow] {rec.tool_name} — {rec.message[:60]}")
+            return "\n".join(lines)
+
+        if sub == "assumptions":
+            if not state.invalidated_assumptions:
+                return "[green]No refuted assumptions or negative constraints active.[/green]"
+            lines = ["[bold cyan]Active Negative Constraints (Refuted Hypotheses):[/bold cyan]"]
+            for a in state.invalidated_assumptions:
+                lines.append(f"  • [bold red]DO NOT RETRY:[/bold red] {a.assumption} ({a.evidence})")
+            return "\n".join(lines)
+
+        return (
+            f"[yellow]Unknown /state subcommand '{sub}'.[/yellow]\n"
+            f"[dim]Available subcommands:[/dim] summary, failures, assumptions, reset, full"
+        )
 
     def _handle_loop(self, arg: str) -> str:
         """Handle /loop command for session-level recurring tasks with Keeper SLM."""
@@ -907,3 +1213,166 @@ class CommandHandler:
             text = content.get("text", "") if isinstance(content, dict) else str(content)
             out_lines.append(f"[bold]{role}:[/bold] {text}")
         return "\n".join(out_lines)
+
+    def _handle_skills(self, arg: str = "") -> str:
+        """Handle the /skills command family."""
+        if not self.skill_registry:
+            return "[yellow]Skill registry is not enabled in this session.[/yellow]"
+
+        tokens = arg.strip().split()
+        sub = tokens[0].lower() if tokens else "list"
+        rest = tokens[1:]
+
+        if sub in {"list", "ls"} or not arg.strip():
+            skills = self.skill_registry.list()
+            if not skills:
+                return (
+                    "[dim]No skills registered yet. "
+                    "Skills can be created by the agent or manually in ~/.isli/skills/<name>.[/dim]"
+                )
+
+            table = Table(
+                title="Registered Skills & Custom Tools",
+                title_style="bold cyan",
+                border_style="dim",
+                show_header=True,
+            )
+            table.add_column("Skill Name", style="bold green")
+            table.add_column("Scope", style="dim")
+            table.add_column("Type", style="cyan")
+            table.add_column("Uses", justify="right")
+            table.add_column("Trust", justify="center")
+            table.add_column("Description", style="white")
+
+            for s in skills:
+                kind = "tool" if s.is_executable else "playbook"
+                if not s.is_executable:
+                    trust_str = "[dim]-[/dim]"
+                elif self.skill_registry.is_trusted(s):
+                    trust_str = "[green]✓ trusted[/green]"
+                else:
+                    trust_str = "[red]✗ untrusted[/red]"
+
+                uses = str(self.skill_registry.get_uses(s.name))
+                table.add_row(
+                    s.name,
+                    s.scope,
+                    kind,
+                    uses,
+                    trust_str,
+                    s.description[:60] + ("..." if len(s.description) > 60 else ""),
+                )
+
+            with self.console.capture() as capture:
+                self.console.print(table)
+                self.console.print(
+                    "[dim]Commands: /skills show <name> · /skills trust <name> · /skills rm <name> · /skills reload[/dim]"
+                )
+            return capture.get().rstrip()
+
+        if sub == "show":
+            if not rest:
+                return "[yellow]Usage: /skills show <name>[/yellow]"
+            name = rest[0]
+            skill = self.skill_registry.get(name)
+            if not skill:
+                return f"[red]Skill '{name}' not found.[/red]"
+
+            lines = [
+                f"[bold cyan]Skill: {skill.name}[/bold cyan] ({skill.scope} scope, v{skill.version})",
+                f"[bold]Description:[/bold] {skill.description}",
+            ]
+            if skill.when_to_use:
+                lines.append(f"[bold]When to use:[/bold] {skill.when_to_use}")
+
+            if skill.is_executable:
+                import json
+
+                manifest = skill.tool_manifest or {}
+                trusted = self.skill_registry.is_trusted(skill)
+                status = "[green]Trusted[/green]" if trusted else "[red]Untrusted (approval required)[/red]"
+                lines.append(f"[bold]Executable Tool:[/bold] [green]{skill.tool_name}[/green] ({status})")
+                lines.append(f"  * Runtime: {manifest.get('runtime', 'python')}")
+                lines.append(f"  * Timeout: {manifest.get('timeout', 120)}s")
+                lines.append(f"  * Parameters: {json.dumps(manifest.get('parameters', {}))}")
+                ep = skill.entrypoint
+                if ep and ep.exists():
+                    lines.append(f"\n[bold]Source Code ({ep.name}):[/bold]")
+                    lines.append(ep.read_text(encoding="utf-8", errors="replace").rstrip())
+
+            lines.append("\n[bold]Playbook (SKILL.md):[/bold]")
+            lines.append(skill.body)
+            return "\n".join(lines)
+
+        if sub == "trust":
+            if not rest:
+                return "[yellow]Usage: /skills trust <name>[/yellow]"
+            name = rest[0]
+            skill = self.skill_registry.get(name)
+            if not skill:
+                return f"[red]Skill '{name}' not found.[/red]"
+            if not skill.is_executable:
+                return f"[yellow]Skill '{name}' is a playbook, not an executable tool (no code to trust).[/yellow]"
+            self.skill_registry.trust(skill)
+            return f"[green]Successfully pinned trust for skill '{name}' (tool `{skill.tool_name}`).[/green]"
+
+        if sub == "untrust":
+            if not rest:
+                return "[yellow]Usage: /skills untrust <name>[/yellow]"
+            name = rest[0]
+            skill = self.skill_registry.get(name)
+            if not skill:
+                return f"[red]Skill '{name}' not found.[/red]"
+            self.skill_registry.untrust(skill)
+            return f"[yellow]Removed trust for skill '{name}'. It will require user approval on execution.[/yellow]"
+
+        if sub in {"rm", "delete", "remove"}:
+            if not rest:
+                return "[yellow]Usage: /skills rm <name>[/yellow]"
+            name = rest[0]
+            skill = self.skill_registry.get(name)
+            if not skill:
+                return f"[red]Skill '{name}' not found.[/red]"
+            self.skill_registry.delete(name)
+            if self.tool_engine and self.keeper:
+                self.skill_registry.sync(self.tool_engine, self.keeper)
+            return f"[green]Deleted skill '{name}'.[/green]"
+
+        if sub in {"mv", "move"}:
+            if len(rest) < 2 or rest[1].lower() not in {"user", "project"}:
+                return "[yellow]Usage: /skills mv <name> <user|project>[/yellow]"
+            name = rest[0]
+            target_scope = rest[1].lower()
+            try:
+                self.skill_registry.move(name, target_scope)
+                return f"[green]Moved skill '{name}' to {target_scope} scope.[/green]"
+            except Exception as e:
+                return f"[red]Failed to move skill '{name}': {e}[/red]"
+
+        if sub == "reload":
+            warnings = self.skill_registry.discover()
+            active_tools = []
+            if self.tool_engine and self.keeper:
+                active_tools = self.skill_registry.sync(self.tool_engine, self.keeper)
+            count = len(self.skill_registry.list())
+            msg = f"[green]Reloaded skills ({count} active skills, {len(active_tools)} custom tools).[/green]"
+            if warnings:
+                msg += "\n" + "\n".join(f"[yellow]Warning: {w}[/yellow]" for w in warnings)
+            return msg
+
+        if sub == "off":
+            if hasattr(self.config, "skills"):
+                self.config.skills.enabled = False
+            if self.tool_engine and self.keeper:
+                self.skill_registry.sync(self.tool_engine, self.keeper)
+            return "[yellow]Skills disabled for current session.[/yellow]"
+
+        if sub == "on":
+            if hasattr(self.config, "skills"):
+                self.config.skills.enabled = True
+            if self.tool_engine and self.keeper:
+                self.skill_registry.sync(self.tool_engine, self.keeper)
+            return "[green]Skills enabled for current session.[/green]"
+
+        return f"[yellow]Unknown action '{sub}'. Type /skills to list available skills.[/yellow]"
+

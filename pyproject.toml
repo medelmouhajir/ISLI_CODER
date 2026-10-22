@@ -50,11 +50,11 @@ Changelog = "https://github.com/medelmouhajir/ISLI_CODER/blob/main/CHANGELOG.md"
 [project.optional-dependencies]
 keeper = [
     # Local model inference (Keeper intelligence layer)
-    "llama-cpp-python>=0.3.0",
+    "llama-cpp-python>=0.3.36",
 ]
 keeper-cuda = [
     # CUDA VRAM acceleration runtime dependencies for Windows/Linux
-    "llama-cpp-python>=0.3.0",
+    "llama-cpp-python>=0.3.36",
     "nvidia-cuda-runtime-cu12>=12.0",
     "nvidia-cublas-cu12>=12.0",
 ]

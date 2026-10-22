@@ -14,11 +14,16 @@ IGNORE_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", ".isli", 
 class ContextManager:
     """Discovers and formats workspace context for system prompts."""
 
-    def __init__(self, project_root: Path, token_budget: int = 800) -> None:
+    def __init__(self, project_root: Path, token_budget: int = 1200) -> None:
         self.project_root = project_root
         self.token_budget = token_budget
         self._recent_edits: list[str] = []
         self._turn_count: int = 0
+
+    def reset(self) -> None:
+        """Reset turn counter and transient edits for a new session."""
+        self._turn_count = 0
+        self._recent_edits = []
 
     def increment_turn(self) -> None:
         """Increment internal turn counter for decay logic."""
@@ -45,17 +50,17 @@ class ContextManager:
             except Exception:
                 pass
 
-        # 2. Git Status: Include on first turn or every 5 turns to conserve tokens
+        # 2. Directory Tree: Include initially or every 10 turns - Protected so it is never dropped
+        if force_full or self._turn_count <= 1 or (self._turn_count % 10 == 0):
+            tree = self._get_directory_tree()
+            if tree:
+                blocks.append(("Project Structure", tree, True))
+
+        # 3. Git Status: Include on first turn or every 5 turns to conserve tokens
         if force_full or self._turn_count <= 1 or (self._turn_count % 5 == 0):
             git_info = self._get_git_info()
             if git_info:
                 blocks.append(("Git Context", git_info, False))
-
-        # 3. Directory Tree: Include only initially or every 10 turns
-        if force_full or self._turn_count <= 1 or (self._turn_count % 10 == 0):
-            tree = self._get_directory_tree()
-            if tree:
-                blocks.append(("Project Structure", tree, False))
 
         # 4. Recent Edits: always include as they reflect ongoing work
         if self._recent_edits:
@@ -117,38 +122,15 @@ class ContextManager:
         except Exception:
             return None
 
-    def _get_directory_tree(self, max_depth: int = 2) -> str:
-        """Generate a concise directory outline."""
-        root = self.project_root.resolve()
-        lines: list[str] = []
+    def _get_directory_tree(self, max_depth: int = 5) -> str:
+        """Generate a clean, global minimal view tree of the workspace."""
+        from isli.engine.workspace_tree import generate_workspace_tree
 
         try:
-            for dirpath, dirnames, filenames in os.walk(root):
-                rel = Path(dirpath).relative_to(root)
-                depth = len(rel.parts)
-                if depth >= max_depth:
-                    dirnames.clear()
-                    continue
-
-                dirnames[:] = [
-                    d for d in dirnames if d not in IGNORE_DIRS and not d.startswith(".")
-                ]
-
-                indent = "  " * depth
-                folder_name = rel.name if depth > 0 else "."
-                lines.append(f"{indent}{folder_name}/")
-
-                file_indent = "  " * (depth + 1)
-                for f in sorted(filenames)[:10]:
-                    if not f.startswith(".") and not f.endswith((".pyc", ".pyo")):
-                        lines.append(f"{file_indent}{f}")
-                if len(filenames) > 10:
-                    lines.append(f"{file_indent}... ({len(filenames) - 10} more files)")
-
-                if len(lines) >= 30:
-                    lines.append("  ... (more directories)")
-                    break
+            return generate_workspace_tree(
+                root=self.project_root,
+                max_lines=50,
+                max_depth=max_depth,
+            )
         except Exception:
             return ""
-
-        return "\n".join(lines[:30])

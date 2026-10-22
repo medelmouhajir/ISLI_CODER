@@ -3,11 +3,13 @@ from isli.utils.permissions import Mode, PermissionGate, PermissionRule, RuleAct
 
 def test_permission_gate_always_allowed():
     gate = PermissionGate()
-    # Read, grep, glob, code_search never require approval
+    # Read, grep, glob, code_search, web_search, web_fetch never require approval
     assert not gate.requires_approval("read", {"path": "a.txt"})
     assert not gate.requires_approval("grep", {"query": "foo"})
     assert not gate.requires_approval("glob", {"pattern": "*.py"})
     assert not gate.requires_approval("code_search", {"query": "bar"})
+    assert not gate.requires_approval("web_search", {"query": "python asyncio"})
+    assert not gate.requires_approval("web_fetch", {"url": "https://python.org"})
 
 
 def test_permission_gate_requires_approval():
@@ -183,3 +185,46 @@ def test_mcp_session_approval():
     gate.grant_session("mcp__github__list_issues")
     assert not gate.requires_approval("mcp__github__list_issues")
     assert gate.requires_approval("mcp__github__create_issue")
+
+
+def test_skill_permissions():
+    gate = PermissionGate()
+    # skill is always allowed and read-only
+    assert not gate.requires_approval("skill", {"action": "list"})
+    assert not gate.requires_approval("skill", {"action": "load", "name": "foo"})
+
+    # skill_manage requires approval
+    assert gate.requires_approval("skill_manage", {"action": "create", "name": "foo"})
+
+
+def test_custom_tool_trust_and_permissions():
+    trusted_tools = set()
+
+    def checker(name: str) -> bool:
+        return name in trusted_tools
+
+    def granter(name: str) -> None:
+        trusted_tools.add(name)
+
+    gate = PermissionGate(trust_checker=checker, trust_granter=granter)
+
+    # Untrusted custom tool requires approval
+    assert gate.requires_approval("custom__my_tool")
+    assert gate.must_ask("custom__my_tool")
+
+    # Session grant on custom tool invokes trust_granter (pins trust)
+    gate.grant_session("custom__my_tool")
+    assert "custom__my_tool" in trusted_tools
+    assert not gate.requires_approval("custom__my_tool")
+    assert not gate.must_ask("custom__my_tool")
+
+
+def test_must_ask_for_skill_manage():
+    gate = PermissionGate()
+    # skill_manage without code does not must_ask in AUTO mode
+    assert not gate.must_ask("skill_manage", {"action": "create", "name": "foo"})
+
+    # skill_manage with executable tool or test must_ask
+    assert gate.must_ask("skill_manage", {"action": "create", "name": "foo", "tool": {"runtime": "python"}})
+    assert gate.must_ask("skill_manage", {"action": "test", "name": "foo"})
+

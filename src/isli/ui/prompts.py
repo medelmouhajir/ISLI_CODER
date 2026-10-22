@@ -121,7 +121,11 @@ def render_token_bar(
     bar = "=" * filled + "-" * (10 - filled)
 
     cached = summary.get("cached_tokens", 0)
-    cached_str = f" ({cached:,} cached)" if cached > 0 else ""
+    cached_str = ""
+    if cached > 0:
+        total_in = summary.get("prompt_tokens", 0) + summary.get("subagent_prompt_tokens", 0)
+        cache_pct = min(100, int((cached / max(1, total_in)) * 100)) if total_in > 0 else 0
+        cached_str = f" [green]({cached:,} ⚡{cache_pct}% cached)[/green]"
 
     folder_name = project_root.name if project_root else Path.cwd().name
     model_name = agent.config.model.split("/")[-1]
@@ -141,7 +145,11 @@ def render_token_bar(
         if tasks:
             completed = sum(1 for t in tasks if t.status == "completed")
             total = len(tasks)
-            tasks_badge = f" [bold yellow][Tasks: {completed}/{total}][/bold yellow] [dim]|[/dim]"
+            subagents_active = sum(
+                1 for t in tasks if getattr(t, "agent", "main") == "subagent" and t.status == "in_progress"
+            )
+            sub_tag = f" 🤖{subagents_active}" if subagents_active else ""
+            tasks_badge = f" [bold yellow][Tasks: {completed}/{total}{sub_tag}][/bold yellow] [dim]|[/dim]"
 
     loop_badge = ""
     sched_active = loop_scheduler and getattr(loop_scheduler, "is_active", False)
@@ -154,6 +162,9 @@ def render_token_bar(
         )
 
     from rich.markup import escape
+
+    sub_tokens = summary.get("subagent_total_tokens", 0)
+    sub_str = f" (🤖{sub_tokens:,})" if sub_tokens > 0 else ""
 
     # Responsive compact layout on narrower terminals (< 105 cols)
     if terminal_width < 105:
@@ -169,7 +180,7 @@ def render_token_bar(
         f"[dim]{escape(model_name)} |[/dim] "
         f"[dim]Ctx:[/dim] [[cyan]{bar}[/cyan]] [dim]{pct}% "
         f"({active_tokens:,}/{budget:,}) | "
-        f"Tokens: {used:,}{cached_str} | Cost: ${cost:.4f}[/dim]"
+        f"Tokens: {used:,}{sub_str}{cached_str} | Cost: ${cost:.4f}[/dim]"
     )
 
 
@@ -194,7 +205,8 @@ class SlashCommandCompleter(Completer):
 
     COMMANDS: dict[str, str] = {
         "/loop": "Run recurring prompt or workspace loop (/loop [int] [until: c] [p])",
-        "/model": "Switch cloud LLM model or view top 25 models",
+        "/provider": "Show active provider (ollama/openrouter) or switch",
+        "/model": "Switch model across providers or view available models",
         "/keeper": "Switch or inspect local Keeper model",
         "/cost": "Show cumulative token and USD cost expenditure",
         "/cache": "View semantic cache stats and token savings",
@@ -210,13 +222,45 @@ class SlashCommandCompleter(Completer):
         "/load": "Restore a previously saved session",
         "/pwd": "Display current working folder, git branch, and stats",
         "/workspace": "Display current working folder, git branch, and stats",
+        "/tree": "Display global minimal view tree of the workspace",
         "/sessions": "List all saved conversation sessions",
+        "/state": "View execution state, goal contract, refuted assumptions & loop health (alias: /health)",
+        "/health": "View execution state, goal contract, refuted assumptions & loop health",
         "/mcp": "Manage MCP servers and tools",
+        "/skills": "Manage reusable skills and tools (list/show/trust/untrust/rm/mv/reload)",
         "/help": "Show all available slash commands",
         "/exit": "Exit ISLI CLI",
     }
 
     SUBCOMMANDS: dict[str, dict[str, str]] = {
+        "/provider": {
+            "ollama": "Switch default provider to Ollama (local & cloud models)",
+            "openrouter": "Switch default provider to OpenRouter (cloud aggregator)",
+            "status": "Check connection and health of all providers",
+        },
+        "/skills": {
+            "list": "List all registered skills and custom tools",
+            "show": "View skill playbook and code (/skills show <name>)",
+            "trust": "Pin trust for an executable skill (/skills trust <name>)",
+            "untrust": "Remove trust for an executable skill (/skills untrust <name>)",
+            "rm": "Delete a skill (/skills rm <name>)",
+            "mv": "Move skill between scopes (/skills mv <name> user|project)",
+            "reload": "Reload skills from disk and sync custom tools",
+            "on": "Enable skills for current session",
+            "off": "Disable skills for current session",
+        },
+        "/state": {
+            "summary": "Show compact overview of goals and accomplishments",
+            "failures": "Show categorized tool errors and failure tallies",
+            "assumptions": "Show refuted hypotheses and negative constraints",
+            "reset": "Clear loop execution state and reset goal contract",
+        },
+        "/health": {
+            "summary": "Show compact overview of goals and accomplishments",
+            "failures": "Show categorized tool errors and failure tallies",
+            "assumptions": "Show refuted hypotheses and negative constraints",
+            "reset": "Clear loop execution state and reset goal contract",
+        },
         "/tasks": {
             "add": "Add a new plan task (e.g. /tasks add <description>)",
             "done": "Mark a task as completed (e.g. /tasks done <id>)",
@@ -357,7 +401,10 @@ def _run_application(app: Application[Any]) -> Any:
         asyncio.get_running_loop()
     except RuntimeError:
         return app.run()
-    return app.run(in_thread=True)
+    try:
+        return app.run(in_thread=True)
+    except (RuntimeError, ValueError):
+        return None
 
 
 def permission_menu_tokens(
@@ -497,9 +544,6 @@ def select_permission_interactive(
     kb = KeyBindings()
 
     def _cleanup_and_exit(app: Application[Any], result: str) -> None:
-        with contextlib.suppress(Exception):
-            if hasattr(app, "renderer"):
-                app.renderer.erase()
         app.exit(result=result)
 
     @kb.add("up")
@@ -568,9 +612,6 @@ def select_permission_interactive(
             full_screen=False,
         )
         res = _run_application(app) or "deny"
-        with contextlib.suppress(Exception):
-            if hasattr(app, "renderer"):
-                app.renderer.erase()
         return res
     except Exception:
         return _fallback_permission(tool_name, args, fallback_input_fn)
@@ -591,11 +632,6 @@ def select_mode_interactive(current_mode: Mode) -> Mode | None:
     kb = KeyBindings()
 
     def _cleanup_and_exit(app: Application[Any], result: Mode | None) -> None:
-        try:
-            if hasattr(app, "renderer"):
-                app.renderer.erase()
-        except Exception:
-            pass
         app.exit(result=result)
 
     @kb.add("up")
@@ -643,9 +679,6 @@ def select_mode_interactive(current_mode: Mode) -> Mode | None:
             full_screen=False,
         )
         res = _run_application(app)
-        with contextlib.suppress(Exception):
-            if hasattr(app, "renderer"):
-                app.renderer.erase()
         return res if isinstance(res, Mode) else None
     except Exception:
         return None
@@ -738,15 +771,28 @@ class StreamingResponseRenderer:
                 self.live.update(self._render_panel(self.content))
 
     def on_tool_call(self, name: str, args: dict[str, Any]) -> None:
-        # If text was streamed before the tool call, close that panel cleanly
+        # If text was streamed before the tool call, check if it was just raw JSON / tool syntax
+        from isli.engine.parsing import clean_content_after_tool_extraction
+
+        remaining = (
+            clean_content_after_tool_extraction(
+                self.content, [{"name": name, "arguments": args}]
+            )
+            if self.content
+            else ""
+        )
+
         if self.live:
             with contextlib.suppress(Exception):
+                if remaining.strip():
+                    self.live.update(self._render_panel(remaining.strip()))
                 self.live.stop()
             self.live = None
             self.content = ""
             self._panel_started = False
         elif self.content and not self.is_tty:
-            self.console.print(self._render_panel(self.content))
+            if remaining.strip():
+                self.console.print(self._render_panel(remaining.strip()))
             self.content = ""
 
         args_str = ", ".join(f"{k}={repr(v)[:45]}" for k, v in args.items()) if args else ""
@@ -772,8 +818,17 @@ class StreamingResponseRenderer:
     def _render_panel(self, text: str) -> Any:
         from rich.markdown import Markdown
         from rich.panel import Panel
+        from isli.engine.parsing import extract_thinking
 
-        body = Markdown(text) if text.strip() else "[dim]Thinking...[/dim]"
+        thinking, answer = extract_thinking(text)
+        if thinking and answer:
+            display_text = f"*[dim]Thinking: {thinking}[/dim]*\n\n{answer}"
+        elif thinking and not answer:
+            display_text = f"*[dim]Thinking: {thinking}...[/dim]*"
+        else:
+            display_text = text
+
+        body = Markdown(display_text) if display_text.strip() else "[dim]Thinking...[/dim]"
         return Panel(
             body,
             title=f"[bold cyan]● ISLI[/bold cyan] [dim]({self.model_name})[/dim]",
@@ -782,3 +837,99 @@ class StreamingResponseRenderer:
             padding=(0, 2),
             safe_box=True,
         )
+
+
+def render_execution_state_panel(state: Any) -> Panel:
+    """Render a comprehensive diagnostic panel for the active ExecutionState."""
+    status_str = getattr(state, "status", "idle")
+    status_val = status_str.value if hasattr(status_str, "value") else str(status_str)
+
+    color_map = {
+        "completed": "green",
+        "executing": "cyan",
+        "planning": "yellow",
+        "verifying": "dodger_blue1",
+        "stuck": "red",
+        "waiting_user": "magenta",
+        "failed": "bold red",
+        "interrupted": "yellow",
+        "idle": "dim",
+    }
+    badge_color = color_map.get(status_val, "white")
+    status_badge = f"[bold {badge_color}]{status_val.upper()}[/bold {badge_color}]"
+
+    stop_reason = getattr(state, "stop_reason", None)
+    reason_val = stop_reason.value if hasattr(stop_reason, "value") else str(stop_reason or "")
+    reason_text = f" [dim]({reason_val})[/dim]" if reason_val else ""
+
+    sections: list[str] = [
+        f"[bold white]Status:[/bold white] {status_badge}{reason_text}  •  "
+        f"[bold white]Turn:[/bold white] [cyan]{getattr(state, 'turn', 0)}[/cyan]",
+        f"[bold white]Objective:[/bold white] [green]{getattr(state.goal, 'objective', '')}[/green]\n",
+    ]
+
+    # Accomplishments
+    facts = getattr(state, "verified_facts", [])
+    files = getattr(state, "modified_files", {})
+    milestones = getattr(state, "completed_milestones", [])
+    validations = getattr(state, "successful_validations", [])
+
+    sections.append("[bold cyan]ACCOMPLISHMENTS[/bold cyan]")
+    if facts:
+        sections.append("  [bold white]Ground Truths:[/bold white]")
+        for f in facts[-4:]:
+            sections.append(f"    ✓ {f}")
+    if files:
+        sections.append("  [bold white]Modified Files:[/bold white]")
+        for p, r in files.items():
+            verified_tag = " [green](verified)[/green]" if getattr(r, "verified", False) else " [dim](unverified)[/dim]"
+            ch_type = getattr(r, "change_type", "edit")
+            sections.append(f"    • [cyan]{p}[/cyan] [{ch_type}]{verified_tag}")
+    if milestones:
+        sections.append("  [bold white]Completed Milestones:[/bold white]")
+        for m in milestones[-4:]:
+            sections.append(f"    ✓ {m}")
+    if validations:
+        sections.append("  [bold white]Passed Validations:[/bold white]")
+        for v in validations[-3:]:
+            sections.append(f"    ✓ [green]{v}[/green]")
+    if not (facts or files or milestones or validations):
+        sections.append("  [dim]No verified accomplishments recorded yet.[/dim]")
+
+    # Refuted assumptions & failures
+    assumptions = getattr(state, "invalidated_assumptions", [])
+    failures = getattr(state, "failures", [])
+
+    sections.append("\n[bold cyan]NEGATIVE CONSTRAINTS & FAILURES[/bold cyan]")
+    if assumptions:
+        sections.append("  [bold yellow]Refuted Assumptions (Do NOT repeat):[/bold yellow]")
+        for a in assumptions[-3:]:
+            sections.append(f"    ✗ \"{a.assumption}\" [dim]({a.evidence[:80]})[/dim]")
+    if failures:
+        sections.append(f"  [bold red]Recorded Failures ({len(failures)} total):[/bold red]")
+        for fail in failures[-3:]:
+            sections.append(f"    ! Turn {fail.turn} [{fail.tool_name}]: [dim]{fail.message[:100]}[/dim]")
+    if not (assumptions or failures):
+        sections.append("  [dim]Clean execution — 0 failures and 0 refuted assumptions.[/dim]")
+
+    # Health & Stuck
+    stuck = getattr(state, "stuck_state", None)
+    if stuck is not None:
+        sections.append("\n[bold cyan]LOOP HEALTH[/bold cyan]")
+        stuck_badge = "[bold red]STUCK[/bold red]" if stuck.is_stuck else "[bold green]HEALTHY[/bold green]"
+        sections.append(
+            f"  Health: {stuck_badge}  •  "
+            f"Consecutive Failures: [yellow]{stuck.consecutive_failures}[/yellow]  •  "
+            f"Recovery Tier: [cyan]{stuck.recovery_tier}[/cyan]"
+        )
+        if stuck.is_stuck and stuck.stuck_reason:
+            sections.append(f"  [bold yellow]Stuck Reason:[/bold yellow] [dim]{stuck.stuck_reason}[/dim]")
+
+    content = "\n".join(sections)
+    return Panel(
+        content,
+        title="[bold cyan]Agent Execution State & Reliability[/bold cyan]",
+        border_style="cyan",
+        padding=(1, 2),
+        safe_box=True,
+    )

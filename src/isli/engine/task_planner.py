@@ -24,6 +24,7 @@ class PlanTask:
     subject: str
     status: TaskStatus = "pending"
     active_action: str | None = None
+    agent: str = "main"  # "main" or "subagent"
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -37,6 +38,7 @@ class PlanTask:
             subject=str(data.get("subject", "")),
             status=data.get("status", "pending"),
             active_action=data.get("active_action"),
+            agent=str(data.get("agent", "main")),
             created_at=float(data.get("created_at", 0.0)),
             updated_at=float(data.get("updated_at", 0.0)),
         )
@@ -69,7 +71,7 @@ class TaskPlanner:
     def set_tasks(self, task_specs: list[dict[str, Any]]) -> list[PlanTask]:
         """Initialize or replace the task plan with a new list of specifications.
 
-        Each spec should be a dict with at least 'subject', and optionally 'status' and 'active_action'.
+        Each spec should be a dict with at least 'subject', and optionally 'status', 'active_action', and 'agent'.
         """
         now = time.time()
         new_tasks: list[PlanTask] = []
@@ -81,12 +83,16 @@ class TaskPlanner:
             if status not in VALID_STATUSES:
                 status = "pending"
             task_id = str(spec.get("id") or str(i))
+            agent = str(spec.get("agent", "main")).lower().strip()
+            if agent not in {"main", "subagent"}:
+                agent = "main"
             new_tasks.append(
                 PlanTask(
                     id=task_id,
                     subject=subject,
                     status=status,
                     active_action=spec.get("active_action"),
+                    agent=agent,
                     created_at=now,
                     updated_at=now,
                 )
@@ -100,6 +106,7 @@ class TaskPlanner:
         status: TaskStatus = "pending",
         active_action: str | None = None,
         task_id: str | None = None,
+        agent: str = "main",
     ) -> PlanTask:
         """Add a single task to the plan."""
         now = time.time()
@@ -114,11 +121,16 @@ class TaskPlanner:
         if status not in VALID_STATUSES:
             status = "pending"
 
+        agent_clean = str(agent).lower().strip()
+        if agent_clean not in {"main", "subagent"}:
+            agent_clean = "main"
+
         task = PlanTask(
             id=task_id,
             subject=subject.strip(),
             status=status,
             active_action=active_action,
+            agent=agent_clean,
             created_at=now,
             updated_at=now,
         )
@@ -131,8 +143,9 @@ class TaskPlanner:
         status: TaskStatus | None = None,
         subject: str | None = None,
         active_action: str | None = None,
+        agent: str | None = None,
     ) -> PlanTask:
-        """Update an existing task's status, subject, or active action."""
+        """Update an existing task's status, subject, active action, or agent."""
         task = self.get_task(task_id)
         if not task:
             raise ValueError(f"Task with id '{task_id}' not found.")
@@ -144,10 +157,15 @@ class TaskPlanner:
                     f"Invalid status '{status}'. Must be one of: {', '.join(sorted(VALID_STATUSES))}"
                 )
             task.status = status
+            if status in {"completed", "failed"} and active_action is None:
+                task.active_action = None
         if subject is not None:
             task.subject = subject.strip()
         if active_action is not None:
             task.active_action = active_action if active_action != "" else None
+        if agent is not None:
+            agent_clean = str(agent).lower().strip()
+            task.agent = agent_clean if agent_clean in {"main", "subagent"} else "main"
         task.updated_at = now
         return task
 
@@ -187,8 +205,13 @@ class TaskPlanner:
             else:
                 marker = "[ ]"
 
-            action_note = f" *(Active: {task.active_action})*" if task.active_action else ""
-            lines.append(f"- {marker} **{task.id}**: {task.subject}{action_note}")
+            action_note = (
+                f" *(Active: {task.active_action})*"
+                if (task.active_action and task.status == "in_progress")
+                else ""
+            )
+            agent_badge = " [🤖 subagent]" if task.agent == "subagent" else ""
+            lines.append(f"- {marker} **{task.id}**: {task.subject}{agent_badge}{action_note}")
         return "\n".join(lines)
 
     def to_dict_list(self) -> list[dict[str, Any]]:

@@ -13,10 +13,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-ALWAYS_ALLOW = {"read", "grep", "glob", "code_search", "todo"}
-REQUIRE_APPROVAL = {"write", "edit", "bash", "git"}
-READ_ONLY_TOOLS = {"read", "grep", "glob", "code_search", "todo"}
+ALWAYS_ALLOW = {"read", "grep", "glob", "code_search", "todo", "ask_user", "web_search", "web_fetch", "skill"}
+REQUIRE_APPROVAL = {"write", "edit", "bash", "git", "skill_manage"}
+READ_ONLY_TOOLS = {"read", "grep", "glob", "code_search", "todo", "ask_user", "web_search", "web_fetch", "skill"}
 MCP_PREFIX = "mcp__"
+CUSTOM_PREFIX = "custom__"
 
 
 def _matches_any(name: str, patterns: set[str]) -> bool:
@@ -87,6 +88,20 @@ class PermissionGate:
     session_approved_tools: set[str] = field(default_factory=set)
     rules: list[PermissionRule] = field(default_factory=list)
     mode: Mode = Mode.NORMAL
+    trust_checker: Any | None = None
+    trust_granter: Any | None = None
+
+    def must_ask(self, tool_name: str, arguments: dict[str, Any] | None = None) -> bool:
+        """Calls that bypass the AUTO-mode Keeper classifier (opaque code execution)."""
+        if tool_name.startswith(CUSTOM_PREFIX):
+            return not (self.trust_checker and self.trust_checker(tool_name))
+        return (
+            tool_name == "skill_manage"
+            and (
+                bool((arguments or {}).get("tool"))
+                or (arguments or {}).get("action") == "test"
+            )
+        )
 
     def set_mode(self, mode: Mode | str) -> None:
         """Switch the active permission mode."""
@@ -154,6 +169,19 @@ class PermissionGate:
         if self.mode == Mode.PLAN and tool_name not in READ_ONLY_TOOLS:
             return True
 
+        # Custom tools: trust is hash-pinned; session grants are NOT honored
+        if tool_name.startswith(CUSTOM_PREFIX):
+            if self.rules:
+                for rule in self.rules:
+                    if fnmatch.fnmatch(tool_name, rule.tool) and fnmatch.fnmatch(
+                        tool_name, rule.pattern
+                    ):
+                        if rule.action == RuleAction.ALLOW:
+                            return False
+                        if rule.action == RuleAction.ASK:
+                            return True
+            return not (self.trust_checker and self.trust_checker(tool_name))
+
         if tool_name in self.session_approved_tools:
             return False
 
@@ -194,6 +222,9 @@ class PermissionGate:
 
     def grant_session(self, tool_name: str) -> None:
         """Grant approval for the rest of the session."""
+        if tool_name.startswith(CUSTOM_PREFIX) and self.trust_granter:
+            self.trust_granter(tool_name)
+            return
         self.session_approved_tools.add(tool_name)
 
     def revoke_session(self, tool_name: str) -> None:

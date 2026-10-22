@@ -50,10 +50,32 @@ class SessionManager:
 
         return new_id
 
+    def set_model(self, model: str) -> None:
+        """Update the active session model in memory and on disk."""
+        if self.active_session_id and model:
+            self.store.update_session_model(self.active_session_id, model)
+
     def sync_tasks(self) -> None:
         """Save current planner tasks to active session in store."""
         if self.active_session_id and self.planner:
             self.store.save_tasks(self.active_session_id, self.planner.to_dict_list())
+
+    def save_telemetry(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cached_tokens: int,
+        cost_usd: float,
+    ) -> None:
+        """Persist session token and cost telemetry to the underlying store."""
+        if self.active_session_id:
+            self.store.update_session_telemetry(
+                session_id=self.active_session_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cached_tokens=cached_tokens,
+                cost_usd=cost_usd,
+            )
 
     def load(self, identifier: str) -> bool:
         """Load an existing session by ID or name."""

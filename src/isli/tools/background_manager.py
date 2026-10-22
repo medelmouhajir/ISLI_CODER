@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -109,11 +110,14 @@ class BackgroundManager:
             # Build environment
             if env is None:
                 env = os.environ.copy()
-                env["CI"] = "1"
-                env["npm_config_yes"] = "true"
-                env["DEBIAN_FRONTEND"] = "noninteractive"
-                env["GIT_TERMINAL_PROMPT"] = "0"
-                env["PYTHONUNBUFFERED"] = "1"
+            # Ensure running python's directory is at the front of PATH
+            py_bin = str(Path(sys.executable).parent)
+            env["PATH"] = f"{py_bin}{os.pathsep}{env.get('PATH', '')}"
+            env["CI"] = "1"
+            env["npm_config_yes"] = "true"
+            env["DEBIAN_FRONTEND"] = "noninteractive"
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            env["PYTHONUNBUFFERED"] = "1"
 
             # Open output file for writing
             out_fh = output_file.open("w", encoding="utf-8", errors="replace")

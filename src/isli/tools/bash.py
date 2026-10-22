@@ -14,7 +14,9 @@ from __future__ import annotations
 import contextlib
 import os
 import platform
+import re
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -107,58 +109,31 @@ class BashTool(BaseTool):
 
     def schema(self) -> ToolSchema:
         desc = (
-            "Execute a shell command in the workspace non-interactively (no stdin). "
-            "On Windows use cmd.exe syntax (dir/cd, not ls/pwd). "
-            if platform.system() == "Windows"
-            else "Execute a shell command in the workspace non-interactively (no stdin). "
-        ) + (
-            "IMPORTANT: Commands run without user input. You MUST pass automated "
-            "confirmation flags (e.g., 'npx --yes create-next-app --yes', 'npm init -y', "
-            "'npm install --yes', 'git --no-pager'). "
-            "Large output is summarized by Keeper; pass `focus` to say exactly "
-            "what you need from it, otherwise specific values may be dropped."
+            "Execute a shell command non-interactively (no stdin). "
+            + ("On Windows use cmd.exe syntax. " if platform.system() == "Windows" else "")
+            + "Always pass non-interactive flags (e.g. -y, --yes)."
         )
-
-        # Add persistent shell note if enabled
         if self._config.persistent_shell:
-            desc += (
-                " Shell state persists across calls: cd, export, and venv activation carry over."
-            )
-
-        # Add background note
+            desc += " Shell state (cd, export) persists across calls."
         if self._bg:
-            desc += (
-                " Set run_in_background=true for dev servers, watchers, or long-running tasks "
-                "(returns a task_id — use the 'tasks' tool to check output or kill)."
-            )
+            desc += " Set run_in_background=true for servers or watchers."
 
         properties: dict[str, Any] = {
             "command": {
                 "type": "string",
-                "description": (
-                    "Shell command to execute non-interactively. "
-                    "Always include confirmation flags (e.g. --yes, -y). "
-                    "Do not run commands that prompt for user input."
-                ),
+                "description": "Shell command to execute non-interactively.",
             },
             "timeout": {
                 "type": "integer",
-                "description": (
-                    f"Seconds before timeout "
-                    f"(default {self._config.default_timeout}, "
-                    f"max {self._config.max_timeout})"
-                ),
+                "description": f"Timeout in seconds (default {self._config.default_timeout}).",
             },
             "focus": {
                 "type": "string",
-                "description": (
-                    "What to extract from large output, e.g. 'failing test names "
-                    "and assertion errors' or 'package names and versions'"
-                ),
+                "description": "Information to extract from output (e.g. 'errors only').",
             },
             "description": {
                 "type": "string",
-                "description": "Short (5-10 word) description of what this command does",
+                "description": "Short description of what command does.",
             },
         }
 
@@ -166,11 +141,7 @@ class BashTool(BaseTool):
         if self._bg:
             properties["run_in_background"] = {
                 "type": "boolean",
-                "description": (
-                    "Run the command in the background without blocking. "
-                    "Use for dev servers, watchers, build watch, etc. "
-                    "Returns a task_id for inspection via the 'tasks' tool."
-                ),
+                "description": "Run in background and return task handle.",
             }
 
         return ToolSchema(
@@ -277,11 +248,20 @@ class BashTool(BaseTool):
     ) -> str:
         """Execute via fresh one-shot subprocess (original behavior)."""
         env = os.environ.copy()
+        # Ensure running python's directory is at the front of PATH
+        py_bin = str(Path(sys.executable).parent)
+        env["PATH"] = f"{py_bin}{os.pathsep}{env.get('PATH', '')}"
         env["CI"] = "1"
         env["npm_config_yes"] = "true"
         env["DEBIAN_FRONTEND"] = "noninteractive"
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["PYTHONUNBUFFERED"] = "1"
+        env["PAGER"] = "cat"
+        env["GIT_PAGER"] = "cat"
+        env["TERM"] = "dumb"
+
+        # Strip trailing pager pipes
+        command = re.sub(r"\|\s*(?:more|less)\b", "", command, flags=re.IGNORECASE).strip()
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
@@ -373,9 +353,10 @@ class BashTool(BaseTool):
         combined_length = len(stdout) + len(stderr)
 
         # Skip Keeper summarization for code/file view commands
-        # to prevent hallucinated code summaries
+        # to prevent hallucinated or swallowed code summaries
+        cmd_clean = command.strip().lower()
         is_file_view = any(
-            command.strip().lower().startswith(prefix)
+            cmd_clean.startswith(prefix)
             for prefix in (
                 "cat ",
                 "type ",
@@ -385,6 +366,22 @@ class BashTool(BaseTool):
                 "gc ",
                 "more ",
                 "less ",
+                "findstr ",
+                "findstr/",
+                "grep ",
+                "rg ",
+                "ag ",
+            )
+        ) or any(
+            pattern in cmd_clean
+            for pattern in (
+                "read_text",
+                ".read()",
+                "readlines()",
+                "open(",
+                "get-content",
+                "findstr",
+                "select-string",
             )
         )
 
@@ -397,7 +394,16 @@ class BashTool(BaseTool):
                 stderr=stderr,
                 focus=focus,
             )
-            if summary.strip() and len(summary) < combined_length:
+            summary_clean = summary.strip()
+            summary_core = re.sub(r"^```[a-z]*\s*", "", summary_clean).rstrip("`").strip().lstrip(">").strip()
+            command_norm = command.strip().strip("`'\"\n\r ")
+            is_echo = (
+                summary_core == command_norm
+                or summary_core in command_norm
+                or (len(command_norm) > 20 and command_norm in summary_core)
+                or "...[loop truncated]" in summary
+            )
+            if summary.strip() and len(summary) < combined_length and not is_echo:
                 result = (
                     f"$ {command} (exit: {return_code})\n\n"
                     f"[Keeper Output Summary ({combined_length} chars raw)]:\n{summary}"

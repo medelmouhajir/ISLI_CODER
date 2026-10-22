@@ -131,3 +131,20 @@ def test_task_planner_to_and_from_dict_list():
     assert len(new_planner.get_tasks()) == 2
     assert new_planner.get_tasks()[0].subject == "Task A"
     assert new_planner.get_tasks()[0].status == "completed"
+
+
+def test_task_planner_agent_assignment():
+    planner = TaskPlanner()
+    t1 = planner.add_task("Main task", agent="main")
+    t2 = planner.add_task("Subagent task", agent="subagent")
+    assert t1.agent == "main"
+    assert t2.agent == "subagent"
+
+    md = planner.render_markdown()
+    assert "**1**: Main task" in md
+    assert "[🤖 subagent]" in md
+    assert "**2**: Subagent task [🤖 subagent]" in md
+
+    # Test update
+    planner.update_task("1", agent="subagent")
+    assert planner.get_task("1").agent == "subagent"

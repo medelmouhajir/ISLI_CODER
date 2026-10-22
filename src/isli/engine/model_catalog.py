@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -187,17 +188,147 @@ CURATED_FALLBACK_MODELS = [
     },
 ]
 
+CURATED_OLLAMA_MODELS: list[dict[str, Any]] = [
+    {
+        "id": "ollama/qwen3.8-27b-uncensored:latest",
+        "name": "Qwen 3.8 27B Uncensored",
+        "provider": "Ollama",
+        "context_length": 131072,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "local",
+    },
+    {
+        "id": "ollama/qwen2.5-coder:14b",
+        "name": "Qwen 2.5 Coder 14B",
+        "provider": "Ollama",
+        "context_length": 131072,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "local",
+    },
+    {
+        "id": "ollama/qwen3.8:latest",
+        "name": "Qwen 3.8",
+        "provider": "Ollama",
+        "context_length": 131072,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "local",
+    },
+    {
+        "id": "ollama/qwen2.5-coder:32b",
+        "name": "Qwen 2.5 Coder 32B",
+        "provider": "Ollama",
+        "context_length": 131072,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "cloud",
+    },
+    {
+        "id": "ollama/llama3.3:70b",
+        "name": "Llama 3.3 70B",
+        "provider": "Ollama",
+        "context_length": 131072,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "cloud",
+    },
+    {
+        "id": "ollama/deepseek-r1:32b",
+        "name": "DeepSeek R1 32B",
+        "provider": "Ollama",
+        "context_length": 131072,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "cloud",
+    },
+    {
+        "id": "ollama/deepseek-r1:70b",
+        "name": "DeepSeek R1 70B",
+        "provider": "Ollama",
+        "context_length": 131072,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "cloud",
+    },
+    {
+        "id": "ollama/command-r-plus:latest",
+        "name": "Command R+ 104B",
+        "provider": "Ollama",
+        "context_length": 131072,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "cloud",
+    },
+    {
+        "id": "ollama/hermes3:8b",
+        "name": "Hermes 3 8B",
+        "provider": "Ollama",
+        "context_length": 131072,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "local",
+    },
+    {
+        "id": "ollama/mistral-small:latest",
+        "name": "Mistral Small 24B",
+        "provider": "Ollama",
+        "context_length": 32768,
+        "prompt_price": 0.0,
+        "completion_price": 0.0,
+        "category": "cloud",
+    },
+]
+
+
+def estimate_model_cost(model_id: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Estimate cost in USD using catalog prices (per 1M tokens) when LiteLLM lacks pricing."""
+    if not model_id or model_id.startswith("ollama/"):
+        return 0.0
+
+    clean_id = model_id.lower()
+    clean_base = clean_id.split("/")[-1]
+    for m in CURATED_FALLBACK_MODELS:
+        m_id = str(m.get("id", "")).lower()
+        if m_id == clean_id or m_id.split("/")[-1] == clean_base:
+            p_price = float(m.get("prompt_price", 0.0))
+            c_price = float(m.get("completion_price", 0.0))
+            return (prompt_tokens * p_price + completion_tokens * c_price) / 1_000_000.0
+
+    # Default fallback for unlisted cloud models: standard tier ($1 / 1M prompt, $3 / 1M completion)
+    return (prompt_tokens * 1.0 + completion_tokens * 3.0) / 1_000_000.0
+
 
 @dataclass
-class OpenRouterModelInfo:
-    """Standardized representation of a model available on OpenRouter."""
+class ModelInfo:
+    """Standardized representation of a model available across providers."""
 
     id: str
     name: str
-    provider: str
-    context_length: int
-    prompt_price: float
-    completion_price: float
+    provider: str  # "OpenRouter" | "Ollama"
+    context_length: int = 128000
+    prompt_price: float = 0.0
+    completion_price: float = 0.0
+    is_local: bool = False
+    size_str: str = ""
+    category: str = "cloud"  # "local" | "cloud"
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+# Backwards compatibility alias
+OpenRouterModelInfo = ModelInfo
+
+
+def format_model_size(bytes_num: int | float | None) -> str:
+    """Format size in bytes into human-readable string (e.g. 12.0 GB, 800 MB)."""
+    if not bytes_num or bytes_num <= 0:
+        return ""
+    gb = bytes_num / (1024**3)
+    if gb >= 1.0:
+        return f"{gb:.1f} GB"
+    mb = bytes_num / (1024**2)
+    return f"{mb:.0f} MB"
 
 
 def get_cache_path() -> Path:
@@ -245,6 +376,137 @@ def fetch_openrouter_raw_models() -> list[dict[str, Any]]:
         log.warning(f"Could not fetch models live from OpenRouter: {e}")
 
     return []
+
+
+def fetch_ollama_local_models(
+    api_base: str = "http://localhost:11434", timeout: float = 2.0
+) -> list[ModelInfo]:
+    """Discover installed models from the local or configured Ollama daemon."""
+    base = api_base.rstrip("/")
+    tags_url = f"{base}/api/tags"
+
+    try:
+        req = urllib.request.Request(
+            tags_url,
+            headers={"User-Agent": "ISLI-Coder-CLI/0.1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            raw_models = data.get("models", [])
+            results: list[ModelInfo] = []
+            for m in raw_models:
+                raw_name = str(m.get("name", m.get("model", ""))).strip()
+                if not raw_name:
+                    continue
+                size_bytes = m.get("size", 0)
+                size_str = format_model_size(size_bytes)
+                details = m.get("details", {})
+                clean_display = raw_name
+                if clean_display.endswith(":latest"):
+                    clean_display = clean_display[:-7]
+
+                results.append(
+                    ModelInfo(
+                        id=f"ollama/{raw_name}",
+                        name=clean_display,
+                        provider="Ollama",
+                        context_length=131072,
+                        prompt_price=0.0,
+                        completion_price=0.0,
+                        is_local=True,
+                        size_str=size_str,
+                        category="local",
+                        details=details,
+                    )
+                )
+            if results:
+                return results
+    except Exception as e:
+        log.debug(f"Ollama REST fetch failed ({e}); attempting CLI fallback.")
+
+    # CLI fallback: run 'ollama list'
+    try:
+        proc = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        if proc.returncode == 0:
+            lines = proc.stdout.strip().splitlines()
+            if len(lines) > 1:
+                results: list[ModelInfo] = []
+                for line in lines[1:]:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    name = parts[0]
+                    # size is usually part index 2 (e.g. 12 GB)
+                    size_str = f"{parts[2]} {parts[3]}" if len(parts) >= 4 and parts[3].upper() in {"GB", "MB"} else ""
+                    clean_display = name[:-7] if name.endswith(":latest") else name
+                    results.append(
+                        ModelInfo(
+                            id=f"ollama/{name}",
+                            name=clean_display,
+                            provider="Ollama",
+                            context_length=131072,
+                            prompt_price=0.0,
+                            completion_price=0.0,
+                            is_local=True,
+                            size_str=size_str,
+                            category="local",
+                        )
+                    )
+                if results:
+                    return results
+    except Exception:
+        pass
+
+    return []
+
+
+def get_top_ollama_models(
+    api_base: str = "http://localhost:11434", limit: int = 25
+) -> list[ModelInfo]:
+    """
+    Retrieve Ollama models:
+    Installed local models first with [Local] status and disk size,
+    followed by curated cloud/library Ollama models.
+    """
+    local_models = fetch_ollama_local_models(api_base=api_base)
+    seen_ids = {m.id for m in local_models}
+    seen_names = {m.name for m in local_models}
+
+    combined: list[ModelInfo] = list(local_models)
+
+    for item in CURATED_OLLAMA_MODELS:
+        m_id = str(item["id"])
+        m_name = str(item["name"])
+        clean_id_name = m_id.split("/")[-1]
+        if clean_id_name.endswith(":latest"):
+            clean_id_name = clean_id_name[:-7]
+
+        if m_id in seen_ids or clean_id_name in seen_names or m_name in seen_names:
+            continue
+        seen_ids.add(m_id)
+
+        combined.append(
+            ModelInfo(
+                id=m_id,
+                name=m_name,
+                provider="Ollama",
+                context_length=int(item.get("context_length", 131072)),
+                prompt_price=0.0,
+                completion_price=0.0,
+                is_local=False,
+                size_str="",
+                category=str(item.get("category", "cloud")),
+            )
+        )
+
+    return combined[:limit]
 
 
 def _from_dict(m: dict[str, Any]) -> OpenRouterModelInfo:
@@ -320,3 +582,24 @@ def get_top_openrouter_models(limit: int = 25) -> list[OpenRouterModelInfo]:
                 selected.append(_from_dict(fb))
 
     return selected[:limit]
+
+
+def get_available_models(
+    provider: str = "all",
+    ollama_base: str = "http://localhost:11434",
+    limit_per_provider: int = 25,
+) -> list[ModelInfo]:
+    """
+    Retrieve models filtered by provider ('all', 'ollama', or 'openrouter').
+    When 'all' is selected, returns Ollama models followed by OpenRouter models.
+    """
+    prov = provider.strip().lower()
+    if prov == "ollama":
+        return get_top_ollama_models(api_base=ollama_base, limit=limit_per_provider)
+    elif prov in {"openrouter", "cloud"}:
+        return get_top_openrouter_models(limit=limit_per_provider)
+
+    # Combined catalog
+    ollama_models = get_top_ollama_models(api_base=ollama_base, limit=limit_per_provider)
+    openrouter_models = get_top_openrouter_models(limit=limit_per_provider)
+    return ollama_models + openrouter_models

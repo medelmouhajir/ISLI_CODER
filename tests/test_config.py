@@ -9,7 +9,7 @@ def test_load_config_defaults(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cfg = load_config(project_root=tmp_path)
     assert cfg.agent.model == "openrouter/anthropic/claude-sonnet-4.5"
-    assert cfg.keeper.model_name == "smollm2-135m"
+    assert cfg.keeper.model_name == "qwen3-0.6b"
     assert cfg.keeper.n_gpu_layers == -1
     assert cfg.keeper.device == "auto"
     assert cfg.behavior.context_budget == 800
@@ -58,3 +58,23 @@ def test_save_global_config(tmp_path: Path, monkeypatch) -> None:
     assert loaded.agent.model == "custom-agent"
     assert loaded.keeper.model_name == "qwen2.5-coder-1.5b"
     assert loaded.behavior.cache_ttl == 450
+
+
+def test_skills_config(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    cfg = load_config(project_root=tmp_path)
+    assert cfg.skills.enabled is True
+    assert cfg.skills.allow_scripts is True
+    assert cfg.skills.default_scope == "user"
+    assert cfg.skills.script_timeout == 120
+    assert cfg.skills.subagent_untrusted_tools is False
+
+    # Customize and save
+    cfg.skills.script_timeout = 60
+    cfg.skills.subagent_untrusted_tools = True
+    save_global_config(cfg)
+
+    loaded = load_config(project_root=tmp_path)
+    assert loaded.skills.script_timeout == 60
+    assert loaded.skills.subagent_untrusted_tools is True
+

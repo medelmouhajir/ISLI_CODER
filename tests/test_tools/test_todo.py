@@ -71,3 +71,25 @@ def test_todo_tool_errors():
 
     # missing task_id for update
     assert "Error: 'task_id' is required" in tool.execute(action="update")
+
+
+def test_todo_tool_agent_parameter():
+    keeper = MagicMock(spec=KeeperClient)
+    planner = TaskPlanner()
+    tool = TodoTool(keeper=keeper, project_root=Path("."), planner=planner)
+
+    tool.execute(
+        action="set",
+        tasks=[
+            {"subject": "Inspect directory", "agent": "main"},
+            {"subject": "Refactor module", "agent": "subagent"},
+        ],
+    )
+    assert planner.get_task("1").agent == "main"
+    assert planner.get_task("2").agent == "subagent"
+
+    tool.execute(action="add", subject="Third step", agent="subagent")
+    assert planner.get_task("3").agent == "subagent"
+
+    tool.execute(action="update", task_id="1", agent="subagent")
+    assert planner.get_task("1").agent == "subagent"

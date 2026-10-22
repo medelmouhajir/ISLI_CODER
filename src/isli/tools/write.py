@@ -7,6 +7,16 @@ from typing import Any
 from isli.tools.base import BaseTool, ToolSchema
 
 
+def strip_code_fences(content: str) -> str:
+    """Strip accidental enclosing markdown code fences like ```python ... ```."""
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            return "\n".join(lines[1:-1])
+    return content
+
+
 class WriteTool(BaseTool):
     """Create or overwrite a file."""
 
@@ -54,6 +64,9 @@ class WriteTool(BaseTool):
             generated = self.keeper.generate_simple_code(description, rel_path)
             if generated:
                 content = generated
+
+        # Sanitize accidental markdown code fences
+        content = strip_code_fences(content)
 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")

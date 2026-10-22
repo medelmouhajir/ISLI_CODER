@@ -8,7 +8,7 @@
 
 Standalone AI coding CLI with a **dual-model architecture**:
 - **Cloud Reasoning Brain**: Any cloud model via LiteLLM (Claude 3.5/3.7 Sonnet, GPT-4o, Gemini 2.5, OpenRouter, Ollama).
-- **Embedded Local Keeper SLM**: Configurable small GGUF model (`smollm2-135m` default, `qwen3-0.6b`, `qwen2.5-coder-1.5b`) running via `llama-cpp-python` as an intelligence layer inside every tool with **GPU VRAM offloading by default**.
+- **Embedded Local Keeper SLM**: Configurable small GGUF model (`qwen3-0.6b` default, `smollm2-135m`, `qwen2.5-coder-1.5b`) running via `llama-cpp-python` as an intelligence layer inside every tool with **GPU VRAM offloading by default**.
 
 ---
 
@@ -18,38 +18,52 @@ Standalone AI coding CLI with a **dual-model architecture**:
    - Cloud LLM handles high-level reasoning and multi-step planning.
    - Local Keeper SLM pre-processes tool inputs and outputs (extracts relevant excerpts, validates code edits, ranks search results, summarizes diffs and command outputs).
    - Drastically cuts cloud token expenditure (50% to 70%) and latency while maintaining accurate code understanding.
-2. **10 Smart Tools & Native MCP**:
-   - `read`: Reads files with line numbers; extracts focused excerpts on large files via Keeper.
+2. **12 Smart Tools & Native MCP**:
+   - `read`: Reads files with line numbers; extracts focused excerpts on large files via Keeper; introspects binary images (`PNG`, `JPEG`, `GIF`, `BMP`, `WEBP`) with dimensions and format.
    - `write`: Creates or overwrites files; generates boilerplate locally via Keeper if needed.
    - `edit`: Exact search-and-replace; pre-validated for syntax and target uniqueness before atomic write.
-   - `grep`: Regex and text search with relevance ranking.
-   - `glob`: Workspace file discovery with pattern filtering.
-   - `bash`: Shell execution with **persistent sessions** (`ShellSession` preserves working directory, environment variables, and venv activation), background process execution (`run_in_background=True`), configurable timeouts, output spill handling (up to `30,000` chars), and graceful termination (`SIGTERM` -> `SIGKILL` / `taskkill`).
-   - `tasks`: Background process manager (`list`, `output`, `kill`) to monitor and manage dev servers and asynchronous tasks started by `bash`.
-   - `todo`: Structured plan task tracking (`set`, `add`, `update`, `list`, `clear`) mirroring Claude Code todo management. Permitted in all modes including read-only `plan` mode; dynamically renders in the TUI status bar (`[Tasks: X/Y]`) and injects into the prompt.
+   - `grep`: Regex and text search with relevance ranking; supports targeted searching inside `node_modules`.
+   - `glob`: Workspace file discovery with pattern filtering; permits explicit path inspection into dependencies.
+   - `bash`: Shell execution with **persistent sessions** (`ShellSession` preserves working directory, environment variables, and venv activation; automated stdin redirection and non-interactive pager defaults prevent hangs), background process execution (`run_in_background=True`), configurable timeouts, output spill handling (up to `30,000` chars), and graceful termination (`SIGTERM` -> `SIGKILL` / `taskkill`).
+   - `tasks`: Unified background process manager (`list`, `output`, `kill`) to monitor and manage dev servers, shell commands, and background subagents.
+   - `todo`: Structured plan task tracking (`set`, `add`, `update`, `list`, `clear`) with selective agent assignment (`agent="main"` vs `agent="subagent"`). Permitted in all modes including read-only `plan` mode; dynamically renders in the TUI status bar (`[Tasks: X/Y]`) and injects into the prompt.
+   - `subagent`: Claude Code-style isolated subagent worker tool. Runs heavy coding or testing in an ephemeral sandbox with direct completion reporting. Supports synchronous execution or non-blocking background workers (`run_in_background=True`).
+   - `ask_user`: Human-in-the-loop interactive clarification tool prompting questions and selectable multiple-choice options with keyboard navigation. Permitted across all permission modes.
    - `code_search`: Python AST symbol indexing and search with multi-language regex fallback.
    - `git`: Status, diff, commit, branch, checkout, stash, and log operations with diff summarization.
    - **MCP Client**: Connects natively to Model Context Protocol servers over stdio and streamable HTTP with multi-scope configs (`.mcp.json`) and sampling support.
-3. **Loop Engine (`/loop`)**:
+3. **Claude Code-Style Multi-Subagents & Non-Blocking Execution**:
+   - Spawns isolated, ephemeral Cloud LLM workers for heavy coding, refactoring, and test authoring tasks.
+   - Selective task planning with `todo` (`agent="main"` vs `agent="subagent"`).
+   - Direct Cloud LLM Reporting: workers return clean, concise milestone receipts directly to the parent orchestrator without burdening the local Keeper SLM.
+   - Non-blocking execution: `subagent(prompt=..., run_in_background=True)` returns immediately with a task handle (`sub_1`), unblocking the main orchestrator to plan, code, or spawn more subagents.
+   - Unified background task management: the `tasks` tool (`list`, `output`, `kill`) tracks both shell processes (`bg_N`) and background subagents (`sub_N`).
+   - Reactive turn notifications: newly finished subagents automatically inject their completion receipts into the orchestrator's conversation history on the next turn.
+   - Cumulative token accounting: `AgentClient` aggregates parent and subagent token spend; the TUI status bar displays combined tokens (`Tokens: X (🤖Y) | Cost: $Z`); `/cost` displays a complete breakdown.
+4. **Agent Loop Reliability & Execution State**:
+   - `ExecutionState`: Tracks the high-level goal contract, ground-truth accomplishments, categorized failures, refuted assumptions (negative constraints), and action thrashing signatures.
+   - `ReliabilityEngine`: Classifies tool failures (`FailureAnalyzer`), detects repetitive/cyclic ping-pong stuck loops (`StuckDetector`), manages 3-tier recovery pivots (`RecoveryManager`), and verifies completion criteria before stopping (`GoalVerifier`).
+   - Inspect live execution health and ground truth at any time via `/state` (alias `/health`).
+5. **Loop Engine (`/loop`)**:
    - Session-level recurring task automation (e.g. `/loop 5m check PR comments`, `/loop 2m until: tests pass pytest`).
    - Keeper SLM zero-cost pre-flight probe gating skips cloud LLM calls when workspace state has not changed.
    - Automated workspace maintenance loop (`.isli/loop.md`).
-4. **Claude Code-Style Permission Safety**:
+6. **Claude Code-Style Permission Safety**:
    - Four execution modes:
-     - `normal`: Manual approval for state-changing tools (`write`, `edit`, `bash`, `git`). Read-only tools (`read`, `grep`, `glob`, `code_search`, `todo`, `tasks list/output`) are always allowed.
-     - `plan`: Read-only mode. Blocks mutating tools while permitting analysis and `todo` plan tracking.
+     - `normal`: Manual approval for state-changing tools (`write`, `edit`, `bash`, `git`). Read-only tools (`read`, `grep`, `glob`, `code_search`, `todo`, `tasks list/output`, `ask_user`) are always allowed.
+     - `plan`: Read-only mode. Blocks mutating tools while permitting analysis, `todo` plan tracking, and `ask_user` questions.
      - `auto`: Local Keeper SLM classifies each tool call as safe or risky.
      - `robot`: Autonomous mode with automatic approval; explicit deny rules remain enforced.
    - Interactive modal prompts with arrow navigation (`↑`/`↓` and `Enter`) or instant `y`/`n`/`a` hotkeys.
-5. **Full-Screen TUI & Interactive REPL**:
+7. **Full-Screen TUI & Interactive REPL**:
    - Claude Code-style 4-region layout with persistent top status bar (workspace, mode, model, context usage progress bar, task count, loop status, cost).
    - Sticky bottom input with multi-line support (`Ctrl+J`), slash autocomplete menu with descriptions, and command history (`↑`/`↓`).
    - Keyboard shortcuts: `Shift+Tab` (cycle modes), `Ctrl+X M` (interactive mode menu), `Esc` (interrupt streaming).
    - Seamless fallback to classic scrollback REPL on non-TTY pipes or unsupported consoles.
-6. **Session Persistence, Caching & Compaction**:
-   - SQLite persistence at `~/.isli/sessions.db` with continuous auto-save.
+8. **Session Persistence, Caching & Compaction**:
+   - SQLite persistence at `~/.isli/sessions.db` with continuous per-turn telemetry auto-save and active model synchronization.
    - Semantic result cache (`KeeperCache`) with configurable TTL.
-   - Automatic history compaction via Keeper when conversation reaches 70% of context budget.
+   - Relevance-aware history compaction preserving root user goals (`Root Goal: ...`) and combining deterministic facts with high-level summaries when reaching 75% of context budget.
 
 ---
 
@@ -135,6 +149,7 @@ isli --mcp-config /path/to/.mcp.json
 | `/load <name>` | Restore a previous conversation session | `/load auth-feature` |
 | `/sessions` | List all saved conversation sessions | `/sessions` |
 | `/mode [name]` | Show or switch permission mode (`normal`, `plan`, `auto`, `robot`) | `/mode plan` |
+| `/state` (alias `/health`) | View execution state, goal contract, refuted assumptions & loop health | `/state` |
 | `/config` | Show active runtime configuration and device offloading | `/config` |
 | `/permissions` | Display tool approval security rules and overrides | `/permissions` |
 | `/mcp [action]` | Manage MCP servers (`list`, `add`, `remove`, `reload`, `tools`, `prompts`) | `/mcp list` |
@@ -160,7 +175,7 @@ max_tokens = 8192
 temperature = 0.0
 
 [keeper]
-model_name = "smollm2-135m"       # smollm2-135m, qwen3-0.6b, qwen2.5-coder-1.5b
+model_name = "qwen3-0.6b"         # qwen3-0.6b, smollm2-135m, qwen2.5-coder-1.5b
 n_ctx = 8192
 n_threads = 4
 n_gpu_layers = -1                 # -1 = full GPU VRAM offload, 0 = CPU only

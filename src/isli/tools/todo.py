@@ -33,12 +33,8 @@ class TodoTool(BaseTool):
         return ToolSchema(
             name="todo",
             description=(
-                "Manage plan tasks and track multi-step progress for the current goal. "
-                "Use this whenever a task involves multiple non-trivial steps. "
-                "Actions: 'set' (initialize or replace full plan list), 'add' (append a single task), "
-                "'update' (change status or active action of a task), 'list' (view all tasks), "
-                "'clear' (remove all tasks). Always mark in_progress before executing a step, "
-                "and mark completed once done."
+                "Manage plan tasks: 'set' (init list), 'add' (single task), "
+                "'update' (change status), 'list' (view tasks), 'clear' (remove all)."
             ),
             parameters={
                 "type": "object",
@@ -53,41 +49,32 @@ class TodoTool(BaseTool):
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": {"type": "string", "description": "Optional custom task ID"},
-                                "subject": {
-                                    "type": "string",
-                                    "description": "Clear description of step",
-                                },
+                                "id": {"type": "string"},
+                                "subject": {"type": "string"},
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed", "failed"],
-                                    "description": "Status of the task (default 'pending')",
                                 },
-                                "active_action": {
+                                "active_action": {"type": "string"},
+                                "agent": {
                                     "type": "string",
-                                    "description": "Optional sub-action description currently executing",
+                                    "enum": ["main", "subagent"],
                                 },
                             },
                             "required": ["subject"],
                         },
-                        "description": "List of task objects when action is 'set'.",
+                        "description": "Task objects for 'set'.",
                     },
-                    "task_id": {
-                        "type": "string",
-                        "description": "Task ID (required for 'update').",
-                    },
+                    "task_id": {"type": "string", "description": "Task ID for 'update'."},
                     "status": {
                         "type": "string",
                         "enum": ["pending", "in_progress", "completed", "failed"],
-                        "description": "New status for the task (used in 'update' or 'add').",
                     },
-                    "subject": {
+                    "subject": {"type": "string"},
+                    "active_action": {"type": "string"},
+                    "agent": {
                         "type": "string",
-                        "description": "Subject or description of the task (used in 'add' or 'update').",
-                    },
-                    "active_action": {
-                        "type": "string",
-                        "description": "Description of the active sub-action currently being performed.",
+                        "enum": ["main", "subagent"],
                     },
                 },
                 "required": ["action"],
@@ -111,11 +98,13 @@ class TodoTool(BaseTool):
                 return "Error: 'subject' is required for action='add'."
             status = kwargs.get("status", "pending")
             active_action = kwargs.get("active_action")
+            agent = kwargs.get("agent", "main")
             task = self.planner.add_task(
                 subject=subject,
                 status=status,
                 active_action=active_action,
                 task_id=kwargs.get("task_id"),
+                agent=agent,
             )
             return f"Added task '{task.id}': {task.subject} [{task.status}].\n{self.planner.render_markdown()}"
 
@@ -126,12 +115,14 @@ class TodoTool(BaseTool):
             status = kwargs.get("status")
             subject = kwargs.get("subject")
             active_action = kwargs.get("active_action")
+            agent = kwargs.get("agent")
             try:
                 task = self.planner.update_task(
                     task_id=task_id,
                     status=status,
                     subject=subject,
                     active_action=active_action,
+                    agent=agent,
                 )
             except ValueError as e:
                 return f"Error: {e}"

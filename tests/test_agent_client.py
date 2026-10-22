@@ -110,3 +110,32 @@ def test_agent_complete_error_handling(mock_completion):
         client.complete([{"role": "user", "content": "hi"}])
     except RuntimeError as e:
         assert "API service unavailable" in str(e)
+
+
+def test_agent_record_subagent_usage():
+    client = AgentClient(AgentConfig())
+    client.total_prompt_tokens = 100
+    client.total_completion_tokens = 50
+    client.total_cost_usd = 0.002
+
+    client.record_subagent_usage(
+        task_id="2",
+        description="OAuth service",
+        usage={
+            "prompt_tokens": 500,
+            "completion_tokens": 200,
+            "cached_tokens": 50,
+            "estimated_cost_usd": 0.015,
+        },
+    )
+
+    assert client.subagent_prompt_tokens == 500
+    assert client.subagent_completion_tokens == 200
+    assert client.subagent_cost_usd == 0.015
+    assert len(client.subagent_task_runs) == 1
+
+    summary = client.usage_summary()
+    assert summary["prompt_tokens"] == 100  # parent only
+    assert summary["subagent_prompt_tokens"] == 500
+    assert summary["total_tokens"] == 150 + 700  # 850 combined
+    assert summary["estimated_cost_usd"] == 0.017  # 0.002 + 0.015

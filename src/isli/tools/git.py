@@ -15,32 +15,15 @@ class GitTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="git",
-            description=(
-                "Run a git subcommand (status, diff, log, branch, add, commit, "
-                "push, checkout, stash)."
-            ),
+            description="Run git subcommands: status, diff, log, branch, add, commit, push, checkout.",
             parameters={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "Git subcommand",
-                        "enum": [
-                            "status",
-                            "diff",
-                            "log",
-                            "branch",
-                            "add",
-                            "commit",
-                            "push",
-                            "checkout",
-                            "stash",
-                        ],
+                        "enum": ["status", "diff", "log", "branch", "add", "commit", "push", "checkout", "stash"],
                     },
-                    "args": {
-                        "type": "string",
-                        "description": "Extra flags, commit message, or branch name",
-                    },
+                    "args": {"type": "string", "description": "Flags, commit msg, or branch."},
                 },
                 "required": ["action"],
             },

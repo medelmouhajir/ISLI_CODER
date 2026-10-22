@@ -78,3 +78,84 @@ def test_no_tool_calls():
     content = "This is a regular assistant response explaining code."
     parsed = parse_tool_calls(content)
     assert parsed == []
+
+
+def test_tier_4_raw_json_unfenced():
+    content = """{
+"action": "todo",
+"arguments": {
+  "action": "set",
+  "tasks": [
+    {"subject": "Inspect project structure", "id": "1"},
+    {"subject": "Reveal hidden tools", "id": "2"}
+  ]
+}
+}"""
+    parsed = parse_tool_calls(content)
+    assert len(parsed) == 1
+    assert parsed[0]["name"] == "todo"
+    assert parsed[0]["arguments"]["action"] == "set"
+    assert len(parsed[0]["arguments"]["tasks"]) == 2
+
+
+def test_tier_4_raw_json_with_name_and_arguments():
+    content = """{
+"name": "todo",
+"arguments": {
+  "action": "add",
+  "tasks": [{"title": "Test"}]
+}
+}"""
+    parsed = parse_tool_calls(content)
+    assert len(parsed) == 1
+    assert parsed[0]["name"] == "todo"
+    assert parsed[0]["arguments"]["action"] == "add"
+
+
+def test_raw_json_embedded_in_text():
+    content = """I will configure the task list now.
+{
+  "action": "todo",
+  "arguments": {
+    "action": "set",
+    "tasks": [{"id": "1", "subject": "Inspect project"}]
+  }
+}
+Please monitor the tasks."""
+    parsed = parse_tool_calls(content)
+    assert len(parsed) == 1
+    assert parsed[0]["name"] == "todo"
+    assert parsed[0]["arguments"]["action"] == "set"
+
+
+def test_extract_thinking():
+    from isli.engine.parsing import extract_thinking
+
+    content = """<think>
+We should check the user's workspace before answering.
+</think>
+Hello! I can help you with your project."""
+    thinking, cleaned = extract_thinking(content)
+    assert thinking == "We should check the user's workspace before answering."
+    assert cleaned == "Hello! I can help you with your project."
+
+
+def test_clean_content_after_tool_extraction():
+    from isli.engine.parsing import clean_content_after_tool_extraction
+
+    raw_json = """{
+"action": "todo",
+"arguments": {"action": "set", "tasks": []}
+}"""
+    parsed = parse_tool_calls(raw_json)
+    cleaned = clean_content_after_tool_extraction(raw_json, parsed)
+    assert cleaned == ""
+
+    mixed = """I will set the tasks now:
+{
+"action": "todo",
+"arguments": {"action": "set", "tasks": []}
+}"""
+    parsed_mixed = parse_tool_calls(mixed)
+    cleaned_mixed = clean_content_after_tool_extraction(mixed, parsed_mixed)
+    assert cleaned_mixed == "I will set the tasks now:"

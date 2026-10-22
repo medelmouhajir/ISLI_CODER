@@ -33,7 +33,7 @@ def _deterministic_summary(middle_turns: list[dict[str, Any]]) -> str:
     tools_used: list[str] = []
     errors: list[str] = []
 
-    file_pattern = re.compile(r"[\w./\\]+\.\w{1,5}")
+    file_pattern = re.compile(r"[\w./\\-]+\.[a-zA-Z]\w{0,5}")
     error_pattern = re.compile(r"(?:Error|Exception|Failed|FAIL|Traceback)[:\s](.{10,80})")
 
     for m in middle_turns:
@@ -72,6 +72,94 @@ def _deterministic_summary(middle_turns: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def prune_tool_observations(
+    messages: list[dict[str, Any]],
+    keep_recent_messages: int = 6,
+    char_threshold: int = 300,
+) -> list[dict[str, Any]]:
+    """Prune bulky historical tool observations, leaving concise semantic stubs.
+
+    Preserves recent tool results within the keep_recent_messages window so the
+    agent can inspect current lines, tracebacks, and search hits. Older results
+    are replaced with short, deterministic summaries to prevent context ballooning.
+    """
+    if len(messages) <= keep_recent_messages:
+        return messages
+
+    pruned: list[dict[str, Any]] = []
+    historical_count = len(messages) - keep_recent_messages
+
+    for i, msg in enumerate(messages):
+        if i >= historical_count or msg.get("role") != "tool":
+            pruned.append(msg)
+            continue
+
+        content = msg.get("content", "")
+        if not isinstance(content, str) or len(content) <= char_threshold:
+            pruned.append(msg)
+            continue
+
+        # If already compacted or ghosted, keep as is
+        if (
+            content.startswith("[File content read")
+            or content.startswith("[Search results")
+            or content.endswith("— compacted]")
+        ):
+            pruned.append(msg)
+            continue
+
+        tool_name = msg.get("name") or "tool"
+        # Task checklists and user decisions should never be truncated to stubs
+        if tool_name in {"todo", "ask_user"}:
+            pruned.append(msg)
+            continue
+
+        lines = [line for line in content.splitlines() if line.strip()]
+        line_count = len(lines)
+
+        if tool_name == "read":
+            # Extract structural signatures: first 2 lines + exports/functions/classes/interfaces
+            sig_lines = []
+            for line in lines[:2]:
+                sig_lines.append(re.sub(r"^\s*\d+\s*\|\s*", "", line)[:80].strip())
+            for line in lines[2:]:
+                stripped = re.sub(r"^\s*\d+\s*\|\s*", "", line).strip()
+                if re.match(
+                    r"^(?:export\s+|function\s+|class\s+|interface\s+|type\s+|def\s+|const\s+\w+\s*=\s*(?:function|\()|\bdefaultVariants\b)",
+                    stripped,
+                ):
+                    sig_lines.append(stripped[:80])
+                if len(sig_lines) >= 6:
+                    break
+            sig_preview = "\n  ".join(sig_lines) if sig_lines else ""
+            compact_text = (
+                f"[File content read ({line_count} lines) -- structural outline:\n  {sig_preview}\n  ... compacted for context efficiency]"
+                if sig_preview
+                else f"[File content read ({line_count} lines) -- compacted for context efficiency]"
+            )
+        elif tool_name in {"grep", "glob", "code_search"}:
+            compact_text = (
+                f"[Search results ({line_count} lines) — compacted for context efficiency]"
+            )
+        elif tool_name in {"bash", "git"}:
+            if line_count > 4:
+                preview = lines[0][:80]
+                tail = lines[-1][:80]
+                compact_text = (
+                    f"[{tool_name} output ({line_count} lines): {preview} ... {tail} — compacted]"
+                )
+            else:
+                compact_text = _cap_content(content, char_threshold) + " [compacted]"
+        else:
+            compact_text = _cap_content(content, char_threshold) + " [compacted]"
+
+        new_msg = dict(msg)
+        new_msg["content"] = compact_text
+        pruned.append(new_msg)
+
+    return pruned
+
+
 def compact_history(
     messages: list[dict[str, Any]],
     keeper: KeeperClient,
@@ -84,6 +172,9 @@ def compact_history(
     Preserves the system message (if present) and the most recent `keep_recent`
     turns. Summarizes middle turns using Keeper.
     """
+    # 1. First attempt lightweight tool observation ghosting
+    messages = prune_tool_observations(messages, keep_recent_messages=max(6, keep_recent * 2))
+
     if len(messages) <= keep_recent + 2:
         return messages
 
@@ -124,18 +215,30 @@ def compact_history(
 
     middle_text = "\n\n".join(formatted_middle)
 
-    # Use Keeper to summarize if available, otherwise structured deterministic fallback
+    # Use Keeper to summarize if available, combined with structured deterministic facts
+    slm_summary = ""
     if keeper.available:
-        summary = keeper.summarize_text(
+        slm_summary = keeper.summarize_text(
             middle_text,
             goal="Preserve key user goals, decisions, code edits, and context",
         )
+    det_summary = _deterministic_summary(middle_turns)
+    if slm_summary and "...[loop truncated]" not in slm_summary and len(slm_summary.strip()) >= 20:
+        summary = f"{slm_summary.strip()}\n\n{det_summary}"
     else:
-        summary = _deterministic_summary(middle_turns)
+        summary = det_summary
+
+    # Prominently preserve initial user goal in compaction header to prevent amnesia
+    initial_goal = ""
+    for m in conversation:
+        if m.get("role") == "user":
+            initial_goal = str(m.get("content", ""))
+            break
+    goal_header = f" | Root Goal: {initial_goal.strip()[:300]}" if initial_goal.strip() else ""
 
     summary_message = {
         "role": "user",
-        "content": f"[Compacted Prior History ({len(middle_turns)} turns)]:\n{summary}",
+        "content": f"[Compacted Prior History ({len(middle_turns)} turns){goal_header}]:\n{summary}",
     }
 
     result = system_msg + [summary_message]
@@ -150,12 +253,15 @@ def compact_history_smart(
     keeper: KeeperClient,
     max_tokens: int,
     current_goal: str = "",
-    keep_recent: int = 4,
+    keep_recent: int = 8,
 ) -> list[dict[str, Any]]:
     """
     Relevance-aware compaction: scores middle messages by relevance to the goal,
     compacting the least relevant messages first.
     """
+    # 1. First attempt lightweight tool observation ghosting
+    messages = prune_tool_observations(messages, keep_recent_messages=max(6, keep_recent * 2))
+
     if len(messages) <= keep_recent + 2:
         return messages
 
@@ -199,11 +305,26 @@ def compact_history_smart(
     middle_text = "\n\n".join(formatted_middle)
     goal_prompt = f"Goal: {current_goal}. " if current_goal else ""
     goal_desc = f"{goal_prompt}Preserve critical facts, decisions, and error resolutions."
-    summary = keeper.summarize_text(middle_text, goal=goal_desc)
+    slm_summary = keeper.summarize_text(middle_text, goal=goal_desc) if keeper.available else ""
+    det_summary = _deterministic_summary(middle_turns)
+
+    if slm_summary and "...[loop truncated]" not in slm_summary and len(slm_summary.strip()) >= 20:
+        summary = f"{slm_summary.strip()}\n\n{det_summary}"
+    else:
+        summary = det_summary
+
+    # Prominently preserve initial user goal in compaction header to prevent amnesia
+    initial_goal = current_goal
+    if not initial_goal:
+        for m in conversation:
+            if m.get("role") == "user":
+                initial_goal = str(m.get("content", ""))
+                break
+    goal_header = f" | Root Goal: {initial_goal.strip()[:300]}" if initial_goal.strip() else ""
 
     summary_message = {
         "role": "user",
-        "content": f"[Compacted Prior History ({len(middle_turns)} turns)]:\n{summary}",
+        "content": f"[Compacted Prior History ({len(middle_turns)} turns){goal_header}]:\n{summary}",
     }
 
     result = system_msg + [summary_message]

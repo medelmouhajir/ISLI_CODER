@@ -4,10 +4,10 @@ Every tool calls this for preprocessing before sending results to the
 big cloud LLM. Supports any GGUF model via llama-cpp-python.
 
 Default model (user-configurable):
-  - SmolLM2-135M-Instruct (Q4_K_M) — ~100MB, ultra-fast on CPU
+  - Qwen3-0.6B (Q8_0) — ~640MB, better reasoning, structured output
 
 Alternative models:
-  - Qwen3-0.6B (Q8_0) — ~640MB, better reasoning, structured output
+  - SmolLM2-135M-Instruct (Q4_K_M) — ~100MB, ultra-fast on CPU
   - Qwen2.5-Coder-1.5B (Q4_K_M) — ~1GB, best code understanding
 """
 
@@ -75,7 +75,7 @@ MODEL_CATALOG: dict[str, dict[str, str]] = {
     },
 }
 
-DEFAULT_MODEL = "smollm2-135m"
+DEFAULT_MODEL = "qwen3-0.6b"
 
 
 @dataclass
@@ -106,7 +106,7 @@ KEEPER_PRESETS: dict[str, dict[str, Any]] = {
     "rank": {"max_tokens": 200, "temperature": 0.0},
     "summarize": {"max_tokens": 512, "temperature": 0.1},
     "parse": {"max_tokens": 384, "temperature": 0.0},
-    "classify": {"max_tokens": 8, "temperature": 0.0},
+    "classify": {"max_tokens": 32, "temperature": 0.0},
 }
 
 KEEPER_SYSTEM_PROMPTS: dict[str, str] = {
@@ -246,10 +246,8 @@ class KeeperClient:
         self._loaded = True
         log.info(f"Keeper model loaded successfully on {self._device_info}")
 
-        # Graduate to SLM modes when Keeper is available
-        if self.config.extraction_mode == "deterministic":
-            self.config.extraction_mode = "slm"
-            log.info("Keeper loaded — extraction_mode upgraded to 'slm'")
+        # Ranking can optionally upgrade to slm if enabled, but extraction_mode
+        # remains deterministic by default to guarantee 100% exact line numbers and syntax
         if self.config.ranking_mode == "deterministic":
             self.config.ranking_mode = "slm"
             log.info("Keeper loaded — ranking_mode upgraded to 'slm'")
@@ -597,8 +595,8 @@ class KeeperClient:
 
         t0 = time.perf_counter()
         try:
-            response = self._llm.create_chat_completion(
-                messages=[
+            kwargs: dict[str, Any] = {
+                "messages": [
                     {
                         "role": "system",
                         "content": KEEPER_SYSTEM_PROMPTS.get(
@@ -609,9 +607,14 @@ class KeeperClient:
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=effective_max,
-                temperature=effective_temp,
-            )
+                "max_tokens": effective_max,
+                "temperature": effective_temp,
+            }
+            # Add repeat_penalty if supported by backend
+            try:
+                response = self._llm.create_chat_completion(**kwargs, repeat_penalty=1.15)
+            except (TypeError, ValueError):
+                response = self._llm.create_chat_completion(**kwargs)
         except Exception as e:
             self.last_error = str(e)
             log.warning(f"Keeper inference failed: {e}")
@@ -619,13 +622,33 @@ class KeeperClient:
         elapsed = (time.perf_counter() - t0) * 1000
         result = response["choices"][0]["message"]["content"] or ""
         result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL)
-        result = result.strip()
+        result = self._detect_repetition(result.strip())
         self.stats["calls"] += 1
         self.stats["total_ms"] += elapsed
         self.stats["chars_in"] += len(prompt)
         self.stats["chars_out"] += len(result)
         log.debug(f"Keeper inference: {elapsed:.0f}ms, {len(result)} chars")
         return result
+
+    @staticmethod
+    def _detect_repetition(text: str, max_repeat: int = 4) -> str:
+        """Detect and truncate degenerative repetitive loops from local model outputs."""
+        words = text.split()
+        if len(words) < 12:
+            return text
+        for n in (1, 2, 3, 4):
+            consecutive = 1
+            for i in range(n, len(words), n):
+                chunk = words[i : i + n]
+                prev_chunk = words[i - n : i]
+                if chunk == prev_chunk and chunk:
+                    consecutive += 1
+                    if consecutive >= max_repeat:
+                        truncated = " ".join(words[:i])
+                        return truncated.rstrip(",; ") + " ...[loop truncated]"
+                else:
+                    consecutive = 1
+        return text
 
     def _extract_json(self, text: str) -> str:
         """Extract first JSON object or array from text."""

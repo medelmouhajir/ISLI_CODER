@@ -148,9 +148,29 @@ def create_components(
         max_tasks=config.bash.max_background_tasks,
     )
 
+    from isli.engine.subagent_pool import SubagentPool
     from isli.engine.task_planner import TaskPlanner
+    from isli.skills.registry import SkillRegistry
+
+    skill_registry = SkillRegistry(
+        project_root=project_root,
+        user_dir=Path.home() / ".isli" / "skills",
+        config=getattr(config, "skills", None),
+    )
+    skill_warnings = skill_registry.discover()
+    for w in skill_warnings:
+        console.print(f"[dim yellow]Notice (skills): {w}[/dim yellow]")
 
     task_planner = TaskPlanner()
+    subagent_pool = SubagentPool(
+        config=config,
+        project_root=project_root,
+        keeper=keeper,
+        planner=task_planner,
+        max_workers=config.behavior.max_concurrent_subagents,
+        parent_agent=agent,
+        skill_registry=skill_registry,
+    )
 
     tool_engine = ToolEngine(
         keeper=keeper,
@@ -166,6 +186,10 @@ def create_components(
         shell_session=shell_session,
         background_manager=background_manager,
         planner=task_planner,
+        ask_user_fn=ask_user_interactive,
+        subagent_pool=subagent_pool,
+        web_config=config.web,
+        skill_registry=skill_registry,
     )
 
     # MCP client: connect external MCP servers and register their tools
@@ -221,6 +245,8 @@ def create_components(
         always_allowed_tools=set(config.permissions.always_allow),
         rules=permission_rules,
         mode=Mode(config.permissions.default_mode),
+        trust_checker=skill_registry.is_tool_trusted,
+        trust_granter=skill_registry.trust_tool,
     )
 
     context_manager = ContextManager(
@@ -233,6 +259,7 @@ def create_components(
         project_root=project_root,
         permission_gate=permission_gate,
         planner=task_planner,
+        skill_registry=skill_registry,
     )
 
     store = SessionStore()
@@ -268,6 +295,7 @@ def create_components(
         planner=task_planner,
         loop_scheduler=loop_scheduler,
         react_loop=loop,
+        skill_registry=skill_registry,
     )
 
     return loop, commands, session_manager, mcp_manager
@@ -278,6 +306,36 @@ def ask_user_permission(tool_name: str, args: dict[str, Any], mode: Mode | None 
     return select_permission_interactive(
         tool_name, args, fallback_input_fn=console.input, mode=mode
     )
+
+
+def ask_user_interactive(
+    question: str, options: list[str] | None = None, context: str | None = None
+) -> str:
+    """Prompt user interactively when agent requests clarification or decision."""
+    console.print()
+    if context:
+        console.print(f"[dim]Context: {context}[/dim]")
+    console.print(f"[bold cyan]● Agent Question:[/bold cyan] [bold white]{question}[/bold white]")
+
+    if options:
+        console.print("[dim]Select an option or type a custom response:[/dim]")
+        for i, opt in enumerate(options, 1):
+            console.print(f"  [bold yellow]{i}.[/bold yellow] {opt}")
+        try:
+            choice = console.input(
+                f"[bold green]Your choice [1-{len(options)} or text]: [/bold green]"
+            ).strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(options):
+                return options[int(choice) - 1]
+            return choice or options[0]
+        except (KeyboardInterrupt, EOFError):
+            return "User interrupted."
+    else:
+        try:
+            ans = console.input("[bold green]Your answer: [/bold green]").strip()
+            return ans or "(No response provided)"
+        except (KeyboardInterrupt, EOFError):
+            return "User interrupted."
 
 
 def print_banner(
@@ -347,6 +405,7 @@ def print_banner(
         mcp_line = ""
 
     mode_info = MODE_INFO[mode]
+    prov_tag = "OLLAMA" if config.agent.model.startswith("ollama/") else "OPENROUTER"
     content = (
         f"[bold cyan]WORKSPACE[/bold cyan]\n"
         f"  * [bold white]Folder:[/bold white]      [green]{root}[/green]\n"
@@ -357,7 +416,7 @@ def print_banner(
         f"[bold {mode_info.color}]{mode_info.label.upper()}[/bold {mode_info.color}] "
         f"[dim]({mode_info.short_desc})[/dim]\n\n"
         f"[bold cyan]INTELLIGENCE ENGINES[/bold cyan]\n"
-        f"  * [bold white]Cloud Brain:[/bold white] [green]{config.agent.model}[/green]\n"
+        f"  * [bold white]LLM Brain:[/bold white]   [green]{config.agent.model}[/green] [dim]({prov_tag})[/dim]\n"
         f"  * [bold white]Keeper SLM:[/bold white]  "
         f"[yellow]{config.keeper.model_name}[/yellow] ({k_status})\n"
         f"{mcp_line}"
@@ -380,6 +439,15 @@ def main() -> None:
     """Main CLI entrypoint."""
     parser = argparse.ArgumentParser(description="ISLI — AI coding CLI with local intelligence")
     parser.add_argument("prompt", nargs="*", help="Optional initial query to execute")
+    parser.add_argument(
+        "--provider",
+        choices=["openrouter", "ollama"],
+        help="Select LLM provider: openrouter or ollama",
+    )
+    parser.add_argument(
+        "--ollama-host",
+        help="Override Ollama daemon base URL (default: http://localhost:11434)",
+    )
     parser.add_argument("--model", help="Override cloud LLM model")
     parser.add_argument("--api-key", help="Override cloud LLM API key")
     parser.add_argument("--keeper", help="Override local Keeper model")
@@ -414,6 +482,10 @@ def main() -> None:
 
     project_root = Path.cwd()
     overrides: dict[str, Any] = {}
+    if args.provider:
+        overrides["provider"] = args.provider
+    if args.ollama_host:
+        overrides["ollama_host"] = args.ollama_host
     if args.model:
         overrides["model"] = args.model
     if args.api_key:
@@ -469,6 +541,7 @@ def main() -> None:
             on_tool_call=renderer.on_tool_call,
             on_tool_result=renderer.on_tool_result,
             ask_permission=lambda t, a: ask_user_permission(t, a, loop.permission_gate.mode),
+            ask_user=ask_user_interactive,
         )
         renderer.finish()
         console.print()
@@ -511,11 +584,17 @@ def main() -> None:
 
             @kb.add("c-x", "m")
             def _open_mode_menu(event: Any) -> None:
-                current = loop.permission_gate.mode
-                selected = select_mode_interactive(current)
-                if selected is not None and selected != current:
-                    loop.permission_gate.set_mode(selected)
-                    render_mode_panel(selected)
+                def _do_select() -> None:
+                    current = loop.permission_gate.mode
+                    selected = select_mode_interactive(current)
+                    if selected is not None and selected != current:
+                        loop.permission_gate.set_mode(selected)
+                        render_mode_panel(selected)
+
+                if hasattr(event.app, "run_in_terminal"):
+                    event.app.run_in_terminal(_do_select)
+                else:
+                    _do_select()
                 event.app.invalidate()
 
             history_file = Path.home() / ".isli" / "history.txt"
@@ -591,6 +670,7 @@ def main() -> None:
                 on_tool_call=renderer.on_tool_call,
                 on_tool_result=renderer.on_tool_result,
                 ask_permission=lambda t, a: ask_user_permission(t, a, loop.permission_gate.mode),
+                ask_user=ask_user_interactive,
             )
             renderer.finish()
             console.print()

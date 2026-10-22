@@ -1,6 +1,6 @@
 """Tests for CLI and CommandHandler."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from isli.cli import create_components
 from isli.commands import CommandHandler
@@ -41,11 +41,11 @@ def test_command_handler(tmp_path, monkeypatch):
     assert agent.config.model == "gpt-4o"
 
     # /keeper
-    assert "smollm2-135m" in handler.handle("/keeper")
+    assert "qwen3-0.6b" in handler.handle("/keeper")
     with patch.object(KeeperClient, "load", return_value=None):
-        res_k_switch = handler.handle("/keeper qwen3-0.6b")
+        res_k_switch = handler.handle("/keeper smollm2-135m")
     assert "Switched Keeper model to" in res_k_switch
-    assert keeper.config.model_name == "qwen3-0.6b"
+    assert keeper.config.model_name == "smollm2-135m"
 
     # /cost
     assert "Token" in handler.handle("/cost") and "Cost" in handler.handle("/cost")
@@ -89,8 +89,8 @@ def test_create_components(tmp_path):
     assert commands is not None
     assert session_mgr is not None
     assert (
-        len(loop.tool_engine.get_definitions()) == 10
-    )  # 10 tools registered (including tasks & todo)!
+        len(loop.tool_engine.get_definitions()) == 17
+    )  # 17 tools registered (including patch, skill, skill_manage, tasks, todo, ask_user, subagent, web_search, & web_fetch)!
 
 
 def test_command_handler_tasks(tmp_path, monkeypatch):
@@ -169,3 +169,97 @@ def test_cli_vram_and_config_commands(tmp_path, monkeypatch):
     cfg_cpu = load_config(overrides={"keeper_gpu_layers": 0, "keeper_device": "cpu"})
     assert cfg_cpu.keeper.n_gpu_layers == 0
     assert cfg_cpu.keeper.device == "cpu"
+
+
+def test_cli_state_and_subcommands(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    from isli.engine.state import ExecutionState
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    config = Config()
+    agent = AgentClient(config.agent)
+    keeper = KeeperClient(config.keeper)
+    session_mgr = SessionManager(SessionStore(tmp_path / "cmd_state.db"))
+    session_mgr.start_new()
+    perm_gate = PermissionGate()
+
+    mock_react_loop = MagicMock()
+    from isli.engine.state import ErrorCategory
+
+    state = ExecutionState(goal_prompt="Build user auth", session_id="test_sess")
+    state.add_verified_fact("Created auth.py")
+    state.record_failure("edit", "path=auth.py", ErrorCategory.EDIT_NOT_FOUND, "String not found")
+    state.add_invalidated_assumption("Assuming table exists", "Table not found in schema")
+    mock_react_loop.active_state = state
+
+    handler = CommandHandler(
+        config, agent, keeper, session_mgr, perm_gate, react_loop=mock_react_loop
+    )
+
+    from rich.panel import Panel
+
+    # Test full panel
+    res_full = handler.handle("/state")
+    assert isinstance(res_full, Panel)
+    assert "Execution State" in str(res_full.title)
+
+    # Test /health alias
+    res_health = handler.handle("/health")
+    assert isinstance(res_health, Panel)
+    assert "Execution State" in str(res_health.title)
+
+    # Test /state summary
+    res_summary = handler.handle("/state summary")
+    assert "Execution State Summary" in res_summary
+    assert "Build user auth" in res_summary
+    assert "Failures Logged:" in res_summary
+    assert "1" in res_summary
+
+    # Test /state failures
+    res_failures = handler.handle("/state failures")
+    assert "Failure Tracker Diagnostics" in res_failures
+    assert "edit_not_found" in res_failures
+
+    # Test /state assumptions
+    res_assumptions = handler.handle("/state assumptions")
+    assert "Active Negative Constraints" in res_assumptions
+    assert "Table not found in schema" in res_assumptions
+
+    # Test /state reset
+    res_reset = handler.handle("/state reset")
+    assert "reset" in res_reset
+    assert mock_react_loop.active_state is None
+
+
+def test_command_handler_cost_subagents_breakdown():
+    mock_agent = MagicMock()
+    mock_agent.usage_summary.return_value = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 200,
+        "parent_total_tokens": 1200,
+        "parent_cost_usd": 0.005,
+        "subagent_prompt_tokens": 3000,
+        "subagent_completion_tokens": 800,
+        "subagent_total_tokens": 3800,
+        "subagent_cost_usd": 0.015,
+        "total_tokens": 5000,
+        "estimated_cost_usd": 0.02,
+        "subagent_task_runs": [
+            {"description": "OAuth token service", "total_tokens": 3800, "cost_usd": 0.015}
+        ],
+    }
+
+    handler = CommandHandler(
+        config=Config(),
+        agent=mock_agent,
+        keeper=MagicMock(),
+        session_manager=MagicMock(),
+        permission_gate=MagicMock(),
+    )
+
+    out = handler.handle("/cost")
+    assert "Parent Orchestrator:" in out
+    assert "Subagents (1 worker run):" in out
+    assert "OAuth token service" in out
+    assert "Combined Total:        5,000 tokens ($0.0200 USD)" in out
+

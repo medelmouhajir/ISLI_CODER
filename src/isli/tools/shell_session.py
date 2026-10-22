@@ -10,7 +10,9 @@ import contextlib
 import logging
 import os
 import platform
+import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -73,11 +75,17 @@ class ShellSession:
     def _default_env() -> dict[str, str]:
         """Build the default non-interactive environment."""
         env = os.environ.copy()
+        # Ensure running python's directory is at the front of PATH
+        py_bin = str(Path(sys.executable).parent)
+        env["PATH"] = f"{py_bin}{os.pathsep}{env.get('PATH', '')}"
         env["CI"] = "1"
         env["npm_config_yes"] = "true"
         env["DEBIAN_FRONTEND"] = "noninteractive"
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["PYTHONUNBUFFERED"] = "1"
+        env["PAGER"] = "cat"
+        env["GIT_PAGER"] = "cat"
+        env["TERM"] = "dumb"
         # Disable shell prompt to avoid noise in captured output
         env["PS1"] = ""
         env["PS2"] = ""
@@ -225,14 +233,20 @@ class ShellSession:
             self._current_marker = marker
             self._marker_found.clear()
 
+            # Strip trailing pager pipes (e.g. | more, | less) that block automated shells
+            sanitized_cmd = re.sub(r"\|\s*(?:more|less)\b", "", command, flags=re.IGNORECASE).strip()
+            if not sanitized_cmd:
+                sanitized_cmd = command.strip()
+
             # Determine how to echo the exit code based on shell type
+            # Redirect stdin from NUL / /dev/null so commands cannot block on shell stdin
             is_cmd = self.shell_name.lower() in ("cmd", "cmd.exe")
             if is_cmd:
                 # cmd.exe syntax
-                script = f"{command}\r\necho {marker}_EXIT_%ERRORLEVEL%\r\n"
+                script = f"( {sanitized_cmd} ) < nul\r\necho {marker}_EXIT_%ERRORLEVEL%\r\n"
             else:
                 # bash/zsh/sh syntax
-                script = f'{command}\n_isli_ec=$?\necho "{marker}_EXIT_${{_isli_ec}}"\n'
+                script = f'( {sanitized_cmd} ) < /dev/null\n_isli_ec=$?\necho "{marker}_EXIT_${{_isli_ec}}"\n'
 
             try:
                 self._process.stdin.write(script)

@@ -35,6 +35,7 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples, fragment_list_to_text
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Dimension, Layout
 from prompt_toolkit.layout.containers import Float, FloatContainer, HSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
@@ -91,7 +92,17 @@ def _block_renderable(block: Block) -> Any:
             safe_box=True,
         )
     if block.kind == "assistant":
-        body = Markdown(block.content) if block.content.strip() else "[dim]Thinking…[/dim]"
+        from isli.engine.parsing import extract_thinking
+
+        thinking, answer = extract_thinking(block.content)
+        if thinking and answer:
+            display_text = f"*[dim]Thinking: {thinking}[/dim]*\n\n{answer}"
+        elif thinking and not answer:
+            display_text = f"*[dim]Thinking: {thinking}...[/dim]*"
+        else:
+            display_text = block.content
+
+        body = Markdown(display_text) if display_text.strip() else "[dim]Thinking…[/dim]"
         return Panel(
             body,
             title=f"[bold cyan]● ISLI[/bold cyan] [dim]({block.meta})[/dim]",
@@ -101,7 +112,7 @@ def _block_renderable(block: Block) -> Any:
             safe_box=True,
         )
     if block.kind == "tool":
-        icon = "📋" if block.meta == "todo" else "⚙"
+        icon = "📋" if block.meta == "todo" else ("🤖" if block.meta == "subagent" else "⚙")
         return f"  [cyan]┌─ {icon} {block.meta}[/cyan] [dim]({block.content})[/dim]"
     if block.kind == "tool_result":
         if block.status == "error":
@@ -355,6 +366,8 @@ class IsliTui:
         self._modal_result: dict[str, Any] | None = None
         self._modal_done: threading.Event | None = None
         self._modal_on_choose: Callable[[Any], None] | None = None
+        self._modal_question = ""
+        self._modal_context: str | None = None
         self._last_ctrl_c: float = 0.0
 
         self._build_input()
@@ -401,38 +414,114 @@ class IsliTui:
         @kb.add("up")
         @kb.add("k")
         def _up(event: Any) -> None:
+            if getattr(self, "_modal_custom_mode", False):
+                return
             self._modal_selected = (self._modal_selected - 1) % len(self._modal_options)
             self._invalidate()
 
         @kb.add("down")
         @kb.add("j")
         def _down(event: Any) -> None:
+            if getattr(self, "_modal_custom_mode", False):
+                return
             self._modal_selected = (self._modal_selected + 1) % len(self._modal_options)
             self._invalidate()
 
         @kb.add("enter")
         def _enter(event: Any) -> None:
+            if self._modal_kind == "ask_user" and getattr(self, "_modal_custom_mode", False):
+                ans = getattr(self, "_modal_custom_text", "").strip()
+                self._modal_choose(ans or "User provided no answer.")
+                return
+            if self._modal_kind == "ask_user" and self._modal_options:
+                chosen = self._modal_options[self._modal_selected]
+                if chosen.startswith("[Other]"):
+                    self._modal_custom_mode = True
+                    self._modal_custom_text = ""
+                    self._invalidate()
+                    return
+                self._modal_choose(chosen)
+                return
             if self._modal_options:
                 self._modal_choose(self._modal_options[self._modal_selected])
+
+        for digit in range(1, 10):
+            def _make_digit_handler(d: int):
+                def _digit_press(event: Any) -> None:
+                    if self._modal_kind == "ask_user":
+                        if getattr(self, "_modal_custom_mode", False):
+                            self._modal_custom_text += str(d)
+                            self._invalidate()
+                            return
+                        idx = d - 1
+                        if 0 <= idx < len(self._modal_options):
+                            chosen = self._modal_options[idx]
+                            if chosen.startswith("[Other]"):
+                                self._modal_custom_mode = True
+                                self._modal_custom_text = ""
+                                self._invalidate()
+                                return
+                            self._modal_selected = idx
+                            self._modal_choose(chosen)
+                return _digit_press
+
+            kb.add(str(digit))(_make_digit_handler(digit))
+
+        @kb.add("space")
+        def _space(event: Any) -> None:
+            if self._modal_kind == "ask_user" and getattr(self, "_modal_custom_mode", False):
+                self._modal_custom_text += " "
+                self._invalidate()
+
+        @kb.add("backspace")
+        def _backspace(event: Any) -> None:
+            if self._modal_kind == "ask_user" and getattr(self, "_modal_custom_mode", False):
+                self._modal_custom_text = self._modal_custom_text[:-1]
+                self._invalidate()
+
+        @kb.add(Keys.Any)
+        def _any_char(event: Any) -> None:
+            if self._modal_kind == "ask_user" and getattr(self, "_modal_custom_mode", False):
+                char = getattr(event, "data", None)
+                if char and char.isprintable():
+                    self._modal_custom_text += char
+                    self._invalidate()
 
         @kb.add("y")
         def _y(event: Any) -> None:
             if self._modal_kind == "permission":
                 self._modal_choose("allow")
+            elif self._modal_kind == "ask_user" and getattr(self, "_modal_custom_mode", False):
+                self._modal_custom_text += "y"
+                self._invalidate()
 
         @kb.add("n")
         def _n(event: Any) -> None:
             if self._modal_kind == "permission":
                 self._modal_choose("deny")
+            elif self._modal_kind == "ask_user" and getattr(self, "_modal_custom_mode", False):
+                self._modal_custom_text += "n"
+                self._invalidate()
 
         @kb.add("a")
         def _a(event: Any) -> None:
             if self._modal_kind == "permission":
                 self._modal_choose("always")
+            elif self._modal_kind == "ask_user" and getattr(self, "_modal_custom_mode", False):
+                self._modal_custom_text += "a"
+                self._invalidate()
 
         @kb.add("c-c")
+        def _ctrl_c_modal(event: Any) -> None:
+            self._modal_choose(None)
+
         @kb.add("escape")
         def _cancel(event: Any) -> None:
+            if self._modal_kind == "ask_user" and getattr(self, "_modal_custom_mode", False):
+                self._modal_custom_mode = False
+                self._modal_custom_text = ""
+                self._invalidate()
+                return
             self._modal_choose(None)
 
         self._modal_control = FormattedTextControl(
@@ -801,6 +890,9 @@ class IsliTui:
         if cmd == "/model" and len(text.strip().split()) == 1:
             self._open_model_modal()
             return
+        if cmd == "/mode" and len(text.strip().split()) == 1:
+            self._open_mode_modal()
+            return
 
         # If user runs /loop stop or cancel while streaming, signal cancel event immediately
         if cmd == "/loop" and len(text.strip().split()) > 1:
@@ -835,6 +927,7 @@ class IsliTui:
                 ask_permission=lambda t, a: self._ask_permission(
                     t, a, self.loop.permission_gate.mode
                 ),
+                ask_user=self._ask_user,
                 cancel_event=self.cancel_event,
             )
         except Exception as e:  # noqa: BLE001 - surface any loop failure in the UI
@@ -854,6 +947,16 @@ class IsliTui:
         self._invalidate()
         done.wait()
         return str(result.get("choice") or "deny")
+
+    def _ask_user(
+        self, question: str, options: list[str] | None = None, context: str | None = None
+    ) -> str:
+        result: dict[str, Any] = {}
+        done = threading.Event()
+        self._ui_queue.put(("ask_user", (question, options, context, result, done)))
+        self._invalidate()
+        done.wait()
+        return str(result.get("answer") or result.get("choice") or "User provided no answer.")
 
     def _run_loop_turn(self, prompt: str, cancel_event: threading.Event) -> str:
         """Execute a single recurring loop turn within the full-screen TUI."""
@@ -876,6 +979,7 @@ class IsliTui:
                 ask_permission=lambda t, a: self._ask_permission(
                     t, a, self.loop.permission_gate.mode
                 ),
+                ask_user=self._ask_user,
                 cancel_event=cancel_event,
             )
             return res or "".join(tokens)
@@ -958,13 +1062,17 @@ class IsliTui:
                 self.view.add(Block("assistant", "", meta=self.model_name))
             self.view.append_to_last(payload)
         elif cmd == "tool_call":
-            if (
-                self.view.blocks
-                and self.view.blocks[-1].kind == "assistant"
-                and not self.view.blocks[-1].content.strip()
-            ):
-                self.view.pop_last()
             name, args = payload
+            if self.view.blocks and self.view.blocks[-1].kind == "assistant":
+                from isli.engine.parsing import clean_content_after_tool_extraction
+
+                rem = clean_content_after_tool_extraction(
+                    self.view.blocks[-1].content, [{"name": name, "arguments": args}]
+                )
+                if not rem.strip():
+                    self.view.pop_last()
+                else:
+                    self.view.blocks[-1].content = rem
             args_str = ", ".join(f"{k}={repr(v)[:45]}" for k, v in args.items()) if args else ""
             self.view.add(Block("tool", meta=name, content=args_str))
         elif cmd == "tool_result":
@@ -1010,6 +1118,9 @@ class IsliTui:
         elif cmd == "permission":
             tool_name, args, mode, result, done = payload
             self._open_permission_modal(tool_name, args, mode, result, done)
+        elif cmd == "ask_user":
+            question, options, context, result, done = payload
+            self._open_ask_user_modal(question, options, context, result, done)
         self._invalidate()
 
     # -- modals -------------------------------------------------------
@@ -1018,6 +1129,8 @@ class IsliTui:
             return permission_menu_tokens(
                 self._modal_tool_name, self._modal_args, self._modal_selected, self._modal_mode
             )
+        if self._modal_kind == "ask_user":
+            return self._ask_user_tokens()
         if self._modal_kind == "model":
             return self._model_menu_tokens()
         return mode_menu_tokens(self._modal_modes, self._modal_current_mode, self._modal_selected)
@@ -1041,6 +1154,59 @@ class IsliTui:
         self._modal_on_choose = None
         self._show_modal()
 
+    def _open_ask_user_modal(
+        self,
+        question: str,
+        options: list[str] | None,
+        context: str | None,
+        result: dict[str, Any],
+        done: threading.Event,
+    ) -> None:
+        self._modal_kind = "ask_user"
+        self._modal_question = question
+        self._modal_context = context
+        opts = list(options) if options else ["Proceed / Continue", "Stop execution"]
+        custom_label = "[Other] Type a custom response..."
+        if custom_label not in opts:
+            opts.append(custom_label)
+        self._modal_options = opts
+        self._modal_selected = 0
+        self._modal_result = result
+        self._modal_done = done
+        self._modal_on_choose = None
+        self._modal_custom_mode = False
+        self._modal_custom_text = ""
+        self._show_modal()
+
+    def _ask_user_tokens(self) -> StyleAndTextTuples:
+        tokens: StyleAndTextTuples = [
+            ("class:title", "\n Agent Clarification / Decision Request:\n"),
+        ]
+        if getattr(self, "_modal_context", None):
+            tokens.append(("class:help", f" Context: {self._modal_context}\n\n"))
+        tokens.append(("class:header", f" {self._modal_question}\n\n"))
+
+        if getattr(self, "_modal_custom_mode", False):
+            tokens.append(("class:help", " Enter your custom response below:\n\n"))
+            text = getattr(self, "_modal_custom_text", "")
+            tokens.append(("class:pointer", " ❯ "))
+            tokens.append(("class:selected", f"{text}█\n\n"))
+            tokens.append(("class:help", " Enter submit · Esc back to options\n"))
+            return tokens
+
+        for i, opt in enumerate(self._modal_options):
+            num_prefix = f"[{i + 1}] " if i < 9 else "    "
+            if i == self._modal_selected:
+                tokens.append(("class:pointer", f" ❯ {num_prefix}"))
+                tokens.append(("class:selected", f"{opt}\n"))
+            else:
+                tokens.append(("class:pointer", f"   {num_prefix}"))
+                tokens.append(("class:option", f"{opt}\n"))
+        tokens.append(
+            ("class:help", "\n  1-9 quick select · ↑/↓ navigate · Enter choose · Esc cancel\n")
+        )
+        return tokens
+
     def _open_mode_modal(self) -> None:
         self._modal_kind = "mode"
         self._modal_modes = list(Mode)
@@ -1061,9 +1227,13 @@ class IsliTui:
             )
 
     def _open_model_modal(self) -> None:
-        from isli.engine.model_catalog import get_top_openrouter_models
+        from isli.engine.model_catalog import get_available_models
 
-        models = get_top_openrouter_models(limit=25)
+        ollama_base = "http://localhost:11434"
+        if hasattr(self.config, "providers") and hasattr(self.config.providers, "ollama"):
+            ollama_base = self.config.providers.ollama.api_base
+
+        models = get_available_models(provider="all", ollama_base=ollama_base, limit_per_provider=20)
         self._modal_kind = "model"
         self._modal_models = models
         self._modal_options = [m.id for m in models]
@@ -1081,7 +1251,7 @@ class IsliTui:
         models = self._modal_models
         selected_idx = self._modal_selected
         tokens: StyleAndTextTuples = [
-            ("class:title", "\nSelect Cloud LLM Model:\n"),
+            ("class:title", "\nSelect LLM Brain (Ollama & OpenRouter):\n"),
         ]
         start = max(0, min(selected_idx - 3, len(models) - 8))
         end = min(len(models), start + 8)
@@ -1089,21 +1259,25 @@ class IsliTui:
             m = models[i]
             m_id = getattr(m, "id", str(m))
             provider = getattr(m, "provider", "")
-            marker = "●" if m_id.endswith(self.model_name) else "○"
+            is_local = getattr(m, "is_local", False)
+            size_str = getattr(m, "size_str", "")
+            marker = "●" if m_id.endswith(self.model_name) or self.model_name in m_id else "○"
+
+            if is_local:
+                badge = f" [⚡Local {size_str}]" if size_str else " [⚡Local]"
+            elif provider.lower() == "ollama":
+                badge = " [☁ Cloud]"
+            else:
+                badge = f" [{provider}]"
+
             if i == selected_idx:
                 tokens.append(("class:pointer", " ❯ "))
                 tokens.append(("class:selected", f"{marker} {m_id}"))
-                if provider:
-                    tokens.append(("class:selected_desc", f" ({provider})\n"))
-                else:
-                    tokens.append(("class:selected", "\n"))
+                tokens.append(("class:selected_desc", f"{badge}\n"))
             else:
                 tokens.append(("class:pointer", "   "))
                 tokens.append(("class:option", f"{marker} {m_id}"))
-                if provider:
-                    tokens.append(("class:option_desc", f" ({provider})\n"))
-                else:
-                    tokens.append(("class:option", "\n"))
+                tokens.append(("class:option_desc", f"{badge}\n"))
         tokens.append(
             ("class:help", " (Use ↑/↓ arrows to navigate, Enter to choose, Esc to cancel)\n")
         )
@@ -1117,12 +1291,30 @@ class IsliTui:
             self.loop.agent.config.model = selected_model
             self.config.agent.model = selected_model
             self.model_name = selected_model.split("/")[-1]
+
+            if hasattr(self.config, "providers"):
+                if selected_model.startswith("ollama/"):
+                    self.config.providers.default = "ollama"
+                    self.loop.agent.config.api_base = self.config.providers.ollama.api_base
+                    self.loop.agent.config.api_key = self.config.providers.ollama.api_key
+                elif selected_model.startswith("openrouter/"):
+                    self.config.providers.default = "openrouter"
+                    self.loop.agent.config.api_key = (
+                        self.config.providers.openrouter.api_key or self.config.agent.api_key
+                    )
+                    self.loop.agent.config.api_base = self.config.providers.openrouter.api_base
+
+            if hasattr(self.loop, "session_manager") and hasattr(self.loop.session_manager, "set_model"):
+                self.loop.session_manager.set_model(selected_model)
+
             with contextlib.suppress(Exception):
                 save_global_config(self.config)
+
+            prov_str = "Ollama" if selected_model.startswith("ollama/") else "OpenRouter"
             self.view.add(
                 Block(
                     "system",
-                    f"[bold green]● Switched cloud LLM model to: {selected_model}[/bold green]",
+                    f"[bold green]● Switched LLM brain to: {selected_model} ({prov_str})[/bold green]",
                 )
             )
             self._invalidate()
@@ -1153,6 +1345,7 @@ class IsliTui:
             on_choose(value)
         if result is not None:
             result["choice"] = value
+            result["answer"] = value
         if done is not None:
             done.set()
 
@@ -1164,6 +1357,8 @@ class IsliTui:
         self._modal_result = None
         self._modal_done = None
         self._modal_on_choose = None
+        self._modal_custom_mode = False
+        self._modal_custom_text = ""
         if self.app is not None:
             self.app.layout.focus(self.input_control)
         self._invalidate()
