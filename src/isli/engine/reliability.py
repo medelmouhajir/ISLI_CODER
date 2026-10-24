@@ -53,6 +53,36 @@ class FailureAnalyzer:
                 [(f"Tool action '{tool_name}' is permitted", output[:150])],
             )
 
+        # 1.5. Output token truncation / max_tokens limit exceeded
+        if (
+            "cut off by the model's max_tokens limit" in out_lower
+            or "arguments are incomplete and the tool was not executed" in out_lower
+            or (isinstance(args, dict) and args.get("_truncated"))
+        ):
+            target = args.get("path") or args.get("command") or tool_name
+            if tool_name == "write":
+                guidance = (
+                    f"Tool 'write' payload for `{target}` exceeded the model's max_tokens output limit. "
+                    "The tool was safely blocked to prevent file corruption. Completed files from earlier "
+                    "in this turn were saved. Do NOT re-try generating the same large batch: write this file "
+                    "individually in a focused turn, or write its skeleton first and use targeted `edit`/`patch`."
+                )
+            elif tool_name in {"edit", "patch"}:
+                guidance = (
+                    f"Tool '{tool_name}' payload exceeded the output token limit. "
+                    "Break the edits into smaller, targeted hunks across separate tool calls."
+                )
+            else:
+                guidance = (
+                    f"Tool '{tool_name}' arguments exceeded the max_tokens limit and were truncated mid-stream. "
+                    "Break the operation down into smaller arguments or separate actions."
+                )
+            return (
+                ErrorCategory.OUTPUT_TRUNCATED,
+                guidance,
+                [("Single generation output token limit accommodates entire payload/batch", output[:150])],
+            )
+
         # 2. Edit tool failures
         if tool_name == "edit":
             if "not found" in out_lower or "targetcontent" in out_lower:
@@ -212,7 +242,7 @@ class StuckDetector:
                 if a.turn > last_edit_turn and a.tool_name == "read" and a.success:
                     read_counts[a.fingerprint] = read_counts.get(a.fingerprint, 0) + 1
                     if read_counts[a.fingerprint] >= 3:
-                        target = a.fingerprint
+                        target = a.target_label or a.fingerprint
                         reason = f"File read loop: '{target}' has been read {read_counts[a.fingerprint]} times without modifying code or advancing"
                         return True, StuckType.CHURN, reason, 2
 
@@ -257,11 +287,16 @@ class RecoveryManager:
         """Create a targeted directive for the agent based on stuck status and tier."""
         stuck = state.stuck_state
         if stuck.recovery_tier >= 3:
+            attempts_info = (
+                f"across {stuck.recovery_attempts} recovery attempts "
+                if stuck.recovery_attempts > 1
+                else ""
+            )
             return (
-                f"[CRITICAL: MULTIPLE FAILURES EXCEEDED TOLERANCE]\n"
-                f"You have encountered {stuck.consecutive_failures} consecutive failures ({stuck.stuck_reason}).\n"
+                f"[CRITICAL: RECOVERY LIMIT EXCEEDED]\n"
+                f"You have encountered {stuck.stuck_reason} {attempts_info}(failures: {stuck.consecutive_failures}).\n"
                 f"MANDATORY ESCALATION:\n"
-                f"You must STOP guessing. Call the `ask_user` tool immediately to request assistance or clarification from the user."
+                f"You must STOP guessing, repeating actions, or cycling. Call the `ask_user` tool immediately to request assistance or clarification from the user."
             )
         if stuck.recovery_tier == 2:
             if stuck.stuck_type == StuckType.CHURN:
@@ -431,9 +466,14 @@ class ReliabilityEngine:
         state.stuck_state.recovery_tier = tier
 
         if is_stuck:
+            state.stuck_state.recovery_attempts += 1
+            if state.stuck_state.recovery_attempts >= 3 and state.stuck_state.recovery_tier < 3:
+                state.stuck_state.recovery_tier = 3
             state.status = ExecutionStatus.STUCK
             directive = self.recovery_manager.create_directive(state)
             state.active_recovery_guidance = directive
+        else:
+            state.stuck_state.recovery_attempts = 0
 
     def verify_completion(
         self,

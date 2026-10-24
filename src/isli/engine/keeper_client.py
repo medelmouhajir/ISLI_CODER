@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,10 +45,12 @@ if sys.platform == "win32":
                 os.environ["PATH"] = dll_dir + ";" + os.environ.get("PATH", "")
 
 Llama: Any
+LlamaGrammar: Any
 try:
-    from llama_cpp import Llama  # type: ignore[import-not-found,no-redef]
+    from llama_cpp import Llama, LlamaGrammar  # type: ignore[import-not-found,no-redef]
 except ImportError:
     Llama = None
+    LlamaGrammar = None
 
 log = logging.getLogger("isli.keeper")
 
@@ -56,26 +59,56 @@ MODEL_CATALOG: dict[str, dict[str, str]] = {
     "smollm2-135m": {
         "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
         "file": "SmolLM2-135M-Instruct-Q4_K_M.gguf",
-        "description": "SmolLM2 135M — Ultra-fast, tiny footprint (~100MB)",
+        "description": "SmolLM2 135M -- Ultra-fast, tiny footprint (~100MB)",
     },
     "qwen3-0.6b": {
         "repo": "Qwen/Qwen3-0.6B-GGUF",
         "file": "Qwen3-0.6B-Q8_0.gguf",
-        "description": "Qwen3 0.6B — Better reasoning, structured output (~640MB)",
+        "description": "Qwen3 0.6B -- Better reasoning, structured output (~640MB)",
+    },
+    "qwen3-0.6b-isli": {
+        "repo": "Qwen/Qwen3-0.6B-GGUF",
+        "file": "Qwen3-0.6B-ISLI-Keeper-Q8_0.gguf",
+        "fallback_file": "Qwen3-0.6B-Q8_0.gguf",
+        "description": "Fine-Tuned Qwen3 0.6B -- Custom lossless compression for ISLI (~640MB)",
     },
     "qwen3-0.6b-3bit": {
         "repo": "unsloth/Qwen3-0.6B-GGUF",
         "file": "Qwen3-0.6B-Q3_K_M.gguf",
-        "description": "Qwen3 0.6B 3-bit — Smallest, fastest (~350MB)",
+        "description": "Qwen3 0.6B 3-bit -- Smallest, fastest (~350MB)",
     },
     "qwen2.5-coder-1.5b": {
         "repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
         "file": "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
-        "description": "Qwen2.5 Coder 1.5B — Best code understanding (~1GB)",
+        "description": "Qwen2.5 Coder 1.5B -- Best code understanding (~1GB)",
     },
 }
 
-DEFAULT_MODEL = "qwen3-0.6b"
+DEFAULT_MODEL = "qwen3-0.6b-isli"
+
+
+# GBNF Grammars for guaranteed structured outputs
+KEEPER_GRAMMARS: dict[str, str] = {
+    "rank": (
+        "root ::= think \"[\" ws (number (\",\" ws number)*)? ws \"]\" ws\n"
+        "think ::= (\"<think>\" [^<]* \"</think>\" ws)?\n"
+        "ws ::= [ \\t\\n\\r]*\n"
+        "number ::= [0-9]+\n"
+    ),
+    "validate": (
+        "root ::= think \"{\" ws \"\\\"valid\\\":\" ws boolean \",\" ws \"\\\"issues\\\":\" ws string-list \",\" ws \"\\\"suggestion\\\":\" ws (string | \"null\") ws \"}\" ws\n"
+        "think ::= (\"<think>\" [^<]* \"</think>\" ws)?\n"
+        "ws ::= [ \\t\\n\\r]*\n"
+        "boolean ::= \"true\" | \"false\"\n"
+        "string-list ::= \"[\" ws (string (\",\" ws string)*)? ws \"]\"\n"
+        "string ::= \"\\\"\" ([^\"\\\\\\x7F\\x00-\\x1F] | \"\\\\\" ([\"\\\\/bfnrt] | \"u\" [0-9a-fA-F]{4}))* \"\\\"\"\n"
+    ),
+    "classify": (
+        "root ::= think (\"safe\" | \"risky\" | \"yes\" | \"no\") ws\n"
+        "think ::= (\"<think>\" [^<]* \"</think>\" ws)?\n"
+        "ws ::= [ \\t\\n\\r]*\n"
+    ),
+}
 
 
 @dataclass
@@ -119,13 +152,14 @@ KEEPER_SYSTEM_PROMPTS: dict[str, str] = {
         "Respond ONLY with the requested JSON schema."
     ),
     "summarize": (
-        "You are a conversation summarizer for a coding assistant. "
-        "Preserve: file names, function signatures, error messages, decisions made. "
-        "Drop: pleasantries, repeated information, verbose explanations."
+        "You are a technical state compressor for an AI coding assistant. Return a concise, structured State Ledger. "
+        "Preserve: completed files with line counts, exact exported member names, error resolutions, and next steps. "
+        "Never use conversational filler, pleasantries, or vague phrases like 'and others' or 'etc.'."
     ),
     "parse": (
-        "You are a command output parser. Extract key results, errors, and "
-        "metrics with their exact values. Preserve error messages verbatim."
+        "You are a command output parser. Extract key results, exact errors, failed assertions, and "
+        "compiler/runtime metrics with their exact values. Preserve error messages and line numbers verbatim. "
+        "Do not describe the output or add commentary."
     ),
     "rank": (
         "You are a search result ranker. Return ONLY a JSON array of indices "
@@ -183,80 +217,87 @@ class KeeperClient:
         self._llm: Any = None
         self._loaded = False
         self._device_info: str = "Uninitialized"
+        self._lock = threading.RLock()
         self.stats: dict[str, Any] = {"calls": 0, "total_ms": 0.0, "chars_in": 0, "chars_out": 0}
         self.last_error: str | None = None
 
     def load(self) -> None:
         """Load the Keeper model into memory."""
-        if not self.config.enabled:
-            log.info("Keeper disabled in config — tools will run without intelligence layer")
-            return
+        with self._lock:
+            if not self.config.enabled:
+                log.info("Keeper disabled in config — tools will run without intelligence layer")
+                return
 
-        if Llama is None:
-            self.last_error = (
-                "llama-cpp-python is required to load Keeper models. "
-                "Please install it using 'pip install llama-cpp-python' or "
-                "'pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124'."
-            )
-            raise ImportError(self.last_error)
+            if Llama is None:
+                self.last_error = (
+                    "llama-cpp-python is required to load Keeper models. "
+                    "Please install it using 'pip install llama-cpp-python' or "
+                    "'pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124'."
+                )
+                raise ImportError(self.last_error)
 
-        try:
-            model_path = self._resolve_model_path()
-            log.info(f"Loading Keeper model: {model_path}")
-
-            # Determine target GPU layers for VRAM offloading
-            target_layers = self.config.n_gpu_layers
-            if self.config.device.lower() in ("cpu", "ram"):
-                target_layers = 0
-            elif self.config.device.lower() in ("gpu", "vram", "cuda") and target_layers == 0:
-                target_layers = -1
+            # Silence raw sys.stderr writes from llama_cpp log callback
+            with contextlib.suppress(Exception):
+                logging.getLogger("llama-cpp-python").setLevel(logging.CRITICAL + 1)
 
             try:
-                self._llm = Llama(
-                    model_path=str(model_path),
-                    n_ctx=self.config.n_ctx,
-                    n_threads=self.config.n_threads,
-                    n_gpu_layers=target_layers,
-                    verbose=False,
-                )
-                if target_layers == -1:
-                    self._device_info = "GPU (VRAM: all layers)"
-                elif target_layers > 0:
-                    self._device_info = f"GPU (VRAM: {target_layers} layers)"
-                else:
-                    self._device_info = "CPU (RAM)"
-            except Exception as gpu_err:
-                if target_layers != 0:
-                    log.warning(
-                        f"Keeper GPU VRAM loading failed ({gpu_err}); falling back to CPU RAM"
-                    )
+                model_path = self._resolve_model_path()
+                log.info(f"Loading Keeper model: {model_path}")
+
+                # Determine target GPU layers for VRAM offloading
+                target_layers = self.config.n_gpu_layers
+                if self.config.device.lower() in ("cpu", "ram"):
+                    target_layers = 0
+                elif self.config.device.lower() in ("gpu", "vram", "cuda") and target_layers == 0:
+                    target_layers = -1
+
+                try:
                     self._llm = Llama(
                         model_path=str(model_path),
                         n_ctx=self.config.n_ctx,
                         n_threads=self.config.n_threads,
-                        n_gpu_layers=0,
+                        n_gpu_layers=target_layers,
                         verbose=False,
                     )
-                    self._device_info = "CPU (RAM, fallback)"
-                else:
-                    raise
-        except Exception as e:
-            self.last_error = str(e)
-            raise
-        self._loaded = True
-        log.info(f"Keeper model loaded successfully on {self._device_info}")
+                    if target_layers == -1:
+                        self._device_info = "GPU (VRAM: all layers)"
+                    elif target_layers > 0:
+                        self._device_info = f"GPU (VRAM: {target_layers} layers)"
+                    else:
+                        self._device_info = "CPU (RAM)"
+                except Exception as gpu_err:
+                    if target_layers != 0:
+                        log.warning(
+                            f"Keeper GPU VRAM loading failed ({gpu_err}); falling back to CPU RAM"
+                        )
+                        self._llm = Llama(
+                            model_path=str(model_path),
+                            n_ctx=self.config.n_ctx,
+                            n_threads=self.config.n_threads,
+                            n_gpu_layers=0,
+                            verbose=False,
+                        )
+                        self._device_info = "CPU (RAM, fallback)"
+                    else:
+                        raise
+            except Exception as e:
+                self.last_error = str(e)
+                raise
+            self._loaded = True
+            log.info(f"Keeper model loaded successfully on {self._device_info}")
 
-        # Ranking can optionally upgrade to slm if enabled, but extraction_mode
-        # remains deterministic by default to guarantee 100% exact line numbers and syntax
-        if self.config.ranking_mode == "deterministic":
-            self.config.ranking_mode = "slm"
-            log.info("Keeper loaded — ranking_mode upgraded to 'slm'")
+            # Ranking can optionally upgrade to slm if enabled, but extraction_mode
+            # remains deterministic by default to guarantee 100% exact line numbers and syntax
+            if self.config.ranking_mode == "deterministic":
+                self.config.ranking_mode = "slm"
+                log.info("Keeper loaded — ranking_mode upgraded to 'slm'")
 
     def unload(self) -> None:
         """Release model resources."""
-        self._llm = None
-        self._loaded = False
-        self._device_info = "Unloaded"
+        with self._lock:
+            self._llm = None
+            self._loaded = False
+            self._device_info = "Unloaded"
 
     @property
     def available(self) -> bool:
@@ -324,11 +365,13 @@ class KeeperClient:
         result = self._generate(prompt, task_type="validate")
         try:
             parsed = json.loads(self._extract_json(result))
-            return {
-                "valid": parsed.get("valid", True),
-                "issues": parsed.get("issues", []),
-                "suggestion": parsed.get("suggestion"),
-            }
+            if isinstance(parsed, dict):
+                return {
+                    "valid": bool(parsed.get("valid", True)),
+                    "issues": parsed.get("issues", []) if isinstance(parsed.get("issues"), list) else [],
+                    "suggestion": parsed.get("suggestion"),
+                }
+            return {"valid": True, "issues": [], "suggestion": None}
         except (json.JSONDecodeError, ValueError):
             return {"valid": True, "issues": [], "suggestion": None}
 
@@ -404,16 +447,18 @@ class KeeperClient:
         stdout: str,
         stderr: str,
         focus: str = "",
+        return_code: int = 0,
     ) -> str:
         """Parse and summarize shell command output."""
         combined = stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
         if not self.available or len(combined) < self.config.min_chars_to_summarize:
             return combined
 
+        status_hint = f"Exit code: {return_code}"
         if focus:
             prompt = (
                 f"From the output of this command, extract ONLY: {focus}\n"
-                f"$ {command}\n\n"
+                f"$ {command} ({status_hint})\n\n"
                 f"Output:\n{head_tail(combined, 6000)}\n\n"
                 f"Rules:\n"
                 f"- Return the requested items with their exact values, one per line\n"
@@ -423,11 +468,12 @@ class KeeperClient:
         else:
             prompt = (
                 f"Summarize the output of this command:\n"
-                f"$ {command}\n\n"
+                f"$ {command} ({status_hint})\n\n"
                 f"Output:\n{head_tail(combined, 6000)}\n\n"
                 f"Rules:\n"
                 f"- Extract key information with exact values\n"
                 f"- Keep error messages and warnings verbatim\n"
+                f"- If exit code is 0 and tests/build succeeded, report status as Passed, not Failed\n"
                 f"- Note any failures or unexpected results"
             )
         return self._generate(prompt, max_tokens=384, task_type="parse")
@@ -470,6 +516,29 @@ class KeeperClient:
         Graceful degradation: returns "risky" when the Keeper model is
         unavailable so the react loop falls back to asking the user.
         """
+        # Hard safety gate: Catch intrinsically destructive operations deterministically
+        if tool_name == "bash":
+            cmd = str(arguments.get("command", ""))
+            dangerous_patterns = [
+                r"rm\s+-(?:r[fF]|f[rR]|r|f)\s+(?:/|~|\.git|\*|/\*|\$HOME)",
+                r"del\s+/[fF]\s+/[sS]",
+                r"rd\s+/[sS]\s+/[qQ]",
+                r"format\s+[A-Za-z]:",
+                r"git\s+push\s+(?:--force|-f)\b",
+                r"git\s+reset\s+--hard\b",
+                r"curl\s+.*@(?:\.env|id_rsa|id_ed25519)",
+                r"\bmkfs\b",
+                r"\bdrop\s+database\b",
+            ]
+            for pat in dangerous_patterns:
+                if re.search(pat, cmd, re.IGNORECASE):
+                    return "risky"
+
+        if tool_name in {"write", "edit", "patch"}:
+            path = str(arguments.get("path", "")).replace("\\", "/")
+            if any(seg in path for seg in [".git/", ".ssh/", "/id_rsa", "/.env"]):
+                return "risky"
+
         if not self.available:
             return "risky"
 
@@ -479,13 +548,9 @@ class KeeperClient:
             f"Proposed tool call:\n"
             f"  tool: {tool_name}\n"
             f"  arguments: {args_str}\n\n"
-            f"Classify this tool call. Reply with exactly one word:\n"
-            f"- 'safe' if it is aligned with the user's goal and does not "
-            f"destroy data, exfiltrate secrets, or modify files outside the "
-            f"project workspace.\n"
-            f"- 'risky' if it is destructive, out of scope, or suspicious."
+            f"Classify this tool call. Reply with exactly one word: 'safe' or 'risky'."
         )
-        result = self._generate(prompt, max_tokens=8, task_type="classify").strip().lower()
+        result = self._generate(prompt, max_tokens=32, task_type="classify").strip().lower()
         return "safe" if result.startswith("safe") else "risky"
 
     def evaluate_loop_condition(
@@ -509,7 +574,7 @@ class KeeperClient:
             f"{tools_str}\n\n"
             f"Has the condition been completely satisfied? Reply with exactly ONE word: 'yes' or 'no'."
         )
-        res = self._generate(prompt, max_tokens=8, task_type="classify").strip().lower()
+        res = self._generate(prompt, max_tokens=32, task_type="classify").strip().lower()
         return res.startswith("yes") or res.startswith("true")
 
     def distill_loop_iteration(
@@ -544,16 +609,17 @@ class KeeperClient:
         """Perform chat completion using local Keeper model."""
         if not self.available or self._llm is None:
             return ""
-        try:
-            resp = self._llm.create_chat_completion(
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=self.config.temperature,
-            )
-            return resp["choices"][0]["message"]["content"] or ""
-        except Exception as e:
-            log.warning(f"Keeper chat failed: {e}")
-            return ""
+        with self._lock:
+            try:
+                resp = self._llm.create_chat_completion(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=self.config.temperature,
+                )
+                return resp["choices"][0]["message"]["content"] or ""
+            except Exception as e:
+                log.warning(f"Keeper chat failed: {e}")
+                return ""
 
     def usage_summary(self) -> dict[str, Any]:
         """Return Keeper telemetry: call counts, latency, and character throughput."""
@@ -570,6 +636,58 @@ class KeeperClient:
             "chars_saved": max(0, self.stats["chars_in"] - self.stats["chars_out"]),
             "last_error": self.last_error,
         }
+
+    def _get_grammar(self, task_type: str) -> Any | None:
+        """Retrieve or compile a LlamaGrammar instance for the task type."""
+        if LlamaGrammar is None or task_type not in KEEPER_GRAMMARS:
+            return None
+        if not hasattr(self, "_grammar_cache"):
+            self._grammar_cache: dict[str, Any] = {}
+        if task_type not in self._grammar_cache:
+            try:
+                grammar_str = KEEPER_GRAMMARS[task_type]
+                # Pre-validate grammar at the native C level to avoid null-pointer access violations
+                if (
+                    self._llm is not None
+                    and hasattr(self._llm, "_model")
+                    and hasattr(self._llm._model, "vocab")
+                ):
+                    import llama_cpp
+
+                    is_valid = False
+                    try:
+                        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                        saved_stderr = os.dup(2)
+                        try:
+                            os.dup2(devnull_fd, 2)
+                            test_sampler = llama_cpp.llama_sampler_init_grammar(
+                                self._llm._model.vocab,
+                                grammar_str.encode("utf-8"),
+                                b"root",
+                            )
+                        finally:
+                            os.dup2(saved_stderr, 2)
+                            os.close(saved_stderr)
+                            os.close(devnull_fd)
+
+                        if test_sampler:
+                            llama_cpp.llama_sampler_free(test_sampler)
+                            is_valid = True
+                    except Exception as ve:
+                        log.debug(f"Grammar native probe exception for {task_type}: {ve}")
+
+                    if not is_valid:
+                        log.warning(
+                            f"GBNF grammar validation failed for '{task_type}'; disabling grammar constraint"
+                        )
+                        self._grammar_cache[task_type] = None
+                        return None
+
+                self._grammar_cache[task_type] = LlamaGrammar.from_string(grammar_str)
+            except Exception as ge:
+                log.debug(f"Failed to compile GBNF grammar for {task_type}: {ge}")
+                self._grammar_cache[task_type] = None
+        return self._grammar_cache.get(task_type)
 
     def _generate(
         self,
@@ -594,31 +712,41 @@ class KeeperClient:
             prompt += "\n/no_think"
 
         t0 = time.perf_counter()
-        try:
-            kwargs: dict[str, Any] = {
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": KEEPER_SYSTEM_PROMPTS.get(
-                            task_type,
-                            "You are a precise code analysis assistant. "
-                            "Be concise and accurate. Return only what is asked for.",
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": effective_max,
-                "temperature": effective_temp,
-            }
-            # Add repeat_penalty if supported by backend
+        with self._lock:
             try:
-                response = self._llm.create_chat_completion(**kwargs, repeat_penalty=1.15)
-            except (TypeError, ValueError):
-                response = self._llm.create_chat_completion(**kwargs)
-        except Exception as e:
-            self.last_error = str(e)
-            log.warning(f"Keeper inference failed: {e}")
-            return ""
+                kwargs: dict[str, Any] = {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": KEEPER_SYSTEM_PROMPTS.get(
+                                task_type,
+                                "You are a precise code analysis assistant. "
+                                "Be concise and accurate. Return only what is asked for.",
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": effective_max,
+                    "temperature": effective_temp,
+                }
+                grammar = self._get_grammar(task_type)
+                if grammar is not None:
+                    kwargs["grammar"] = grammar
+
+                # Add repeat_penalty if supported by backend
+                try:
+                    response = self._llm.create_chat_completion(**kwargs, repeat_penalty=1.15)
+                except (TypeError, ValueError):
+                    if "grammar" in kwargs:
+                        kwargs.pop("grammar")
+                    try:
+                        response = self._llm.create_chat_completion(**kwargs)
+                    except (TypeError, ValueError):
+                        response = self._llm.create_chat_completion(**kwargs)
+            except Exception as e:
+                self.last_error = str(e)
+                log.warning(f"Keeper inference failed: {e}")
+                return ""
         elapsed = (time.perf_counter() - t0) * 1000
         result = response["choices"][0]["message"]["content"] or ""
         result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL)
@@ -651,19 +779,33 @@ class KeeperClient:
         return text
 
     def _extract_json(self, text: str) -> str:
-        """Extract first JSON object or array from text."""
+        """Extract first JSON object or array from text, respecting string literals."""
         for i, ch in enumerate(text):
             if ch in "{[":
-                depth = 0
                 opener = ch
                 closer = "}" if ch == "{" else "]"
+                depth = 0
+                in_str = False
+                escape = False
                 for j in range(i, len(text)):
-                    if text[j] == opener:
-                        depth += 1
-                    elif text[j] == closer:
-                        depth -= 1
-                        if depth == 0:
-                            return text[i : j + 1]
+                    c = text[j]
+                    if escape:
+                        escape = False
+                        continue
+                    if c == "\\":
+                        if in_str:
+                            escape = True
+                        continue
+                    if c == '"':
+                        in_str = not in_str
+                        continue
+                    if not in_str:
+                        if c == opener:
+                            depth += 1
+                        elif c == closer:
+                            depth -= 1
+                            if depth == 0:
+                                return text[i : j + 1]
         return text
 
     def _resolve_model_path(self) -> Path:
@@ -693,6 +835,15 @@ class KeeperClient:
 
         if cached.exists():
             return cached
+
+        # Check for fallback file (e.g. if custom fine-tuned GGUF is not yet exported)
+        if self.config.model_name in MODEL_CATALOG and "fallback_file" in MODEL_CATALOG[self.config.model_name]:
+            fallback_filename = MODEL_CATALOG[self.config.model_name]["fallback_file"]
+            fallback_path = cache_dir / fallback_filename
+            if fallback_path.exists():
+                log.info(f"Custom model '{filename}' not found; using catalog base '{fallback_filename}'")
+                return fallback_path
+            filename = fallback_filename
 
         from huggingface_hub import hf_hub_download
 

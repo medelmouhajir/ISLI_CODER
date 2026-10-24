@@ -106,6 +106,7 @@ class BashTool(BaseTool):
             self._config = bash_config
         self._session = shell_session
         self._bg = background_manager
+        self.last_metadata: dict[str, Any] = {}
 
     def schema(self) -> ToolSchema:
         desc = (
@@ -382,8 +383,18 @@ class BashTool(BaseTool):
                 "get-content",
                 "findstr",
                 "select-string",
+                "object.keys(",
+                "exports",
+                "cat ",
+                "type ",
             )
         )
+
+        self.last_metadata = {
+            "is_file_view": is_file_view,
+            "return_code": return_code,
+            "command": command,
+        }
 
         # Summarize large command output with Keeper if available
         threshold = getattr(self.keeper.config, "min_chars_to_summarize", 2000)
@@ -393,6 +404,7 @@ class BashTool(BaseTool):
                 stdout=stdout,
                 stderr=stderr,
                 focus=focus,
+                return_code=return_code,
             )
             summary_clean = summary.strip()
             summary_core = re.sub(r"^```[a-z]*\s*", "", summary_clean).rstrip("`").strip().lstrip(">").strip()
@@ -408,9 +420,37 @@ class BashTool(BaseTool):
                     f"$ {command} (exit: {return_code})\n\n"
                     f"[Keeper Output Summary ({combined_length} chars raw)]:\n{summary}"
                 )
-                if return_code != 0 and stderr:
-                    stderr_tail = "\n".join(stderr.splitlines()[-20:])
-                    result += f"\n\n--- stderr (tail) ---\n{stderr_tail}"
+                # Check for errors in return_code, stderr, or stdout (e.g. piped commands like '2>&1 | tail'
+                # which mask non-zero return codes and redirect stderr into stdout)
+                error_pattern = re.compile(
+                    r"\b(?:Error:|Failed to compile|Build error occurred|Export encountered an error|FAIL\b|FAILED\b|Traceback|SyntaxError|TypeError|error TS\d+)\b",
+                    re.IGNORECASE,
+                )
+                has_error = (
+                    return_code != 0
+                    or bool(error_pattern.search(stderr or ""))
+                    or bool(error_pattern.search(stdout or ""))
+                )
+                if has_error:
+                    if stderr and stderr.strip():
+                        stderr_tail = "\n".join(stderr.strip().splitlines()[-15:])
+                        result += f"\n\n--- stderr (tail) ---\n{stderr_tail}"
+                    elif stdout and stdout.strip():
+                        error_tail = "\n".join(stdout.strip().splitlines()[-15:])
+                        result += f"\n\n--- error context (tail) ---\n{error_tail}"
+                else:
+                    # On successful test or build runs, append the verbatim final summary lines
+                    # so the agent immediately sees exact pass counts without redundant confirmation calls
+                    is_test_or_build = bool(
+                        re.search(
+                            r"\b(jest|pytest|vitest|unittest|tsc|eslint|ruff|npm\s+(?:test|run\s+(?:build|test|lint|check))|cargo\s+(?:test|check))\b",
+                            command,
+                            re.IGNORECASE,
+                        )
+                    )
+                    if is_test_or_build and stdout and stdout.strip():
+                        test_tail = "\n".join(stdout.strip().splitlines()[-10:])
+                        result += f"\n\n--- test/build result (tail) ---\n{test_tail}"
                 return result
 
         output_parts = [f"$ {command} (exit: {return_code})"]

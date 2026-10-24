@@ -166,3 +166,61 @@ def test_prune_tool_observations_ghosts_older_bulky_results():
 
     # Recent tool (index 8) must remain completely intact
     assert pruned[8]["content"] == "recent file content\nexact line 1\nexact line 2"
+
+
+def test_prune_bulky_historical_write_tool_calls():
+    """Verify bulky historical write tool calls have content compacted while keeping recent intact."""
+    import json
+    from isli.memory.compaction import prune_tool_observations
+
+    big_code = "export class RateLimiter {}\n" * 100  # ~3000 chars
+    recent_code = "export class NewService {}\n" * 100
+
+    messages = [
+        {"role": "user", "content": "Create files"},
+        {
+            "role": "assistant",
+            "content": "Writing rate limiter",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "write",
+                        "arguments": json.dumps({"path": "src/rateLimiter.ts", "content": big_code}),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "name": "write", "content": "Wrote 100 lines to src/rateLimiter.ts"},
+        {
+            "role": "assistant",
+            "content": "Writing new service",
+            "tool_calls": [
+                {
+                    "id": "c2",
+                    "type": "function",
+                    "function": {
+                        "name": "write",
+                        "arguments": json.dumps({"path": "src/newService.ts", "content": recent_code}),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "name": "write", "content": "Wrote 100 lines to src/newService.ts"},
+    ]
+
+    # Keep only the last 2 messages as recent
+    pruned = prune_tool_observations(messages, keep_recent_messages=2)
+
+    # Historical assistant message (index 1) write content should be compacted
+    old_call = pruned[1]["tool_calls"][0]["function"]
+    old_args = json.loads(old_call["arguments"])
+    assert "characters written to src/rateLimiter.ts" in old_args["content"]
+    assert "compacted for context efficiency" in old_args["content"]
+
+    # Recent assistant message (index 3) is within the recent window and must not be touched
+    recent_call = pruned[3]["tool_calls"][0]["function"]
+    recent_args = json.loads(recent_call["arguments"])
+    assert recent_args["content"] == recent_code
+

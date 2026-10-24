@@ -25,7 +25,13 @@ from isli.engine.state import ExecutionState, ExecutionStatus, StopReason
 from isli.engine.tool_engine import ToolEngine, ToolResult
 from isli.memory.compaction import compact_history_smart, prune_tool_observations
 from isli.memory.session import SessionManager
-from isli.utils.permissions import READ_ONLY_TOOLS, Mode, PermissionGate
+from isli.utils.permissions import (
+    PLAN_EXPOSED_TOOLS,
+    READ_ONLY_TOOLS,
+    Mode,
+    PermissionGate,
+    is_plan_mode_allowed,
+)
 from isli.utils.tokens import compact_output, estimate_messages_tokens, head_tail
 
 log = logging.getLogger("isli.loop")
@@ -57,7 +63,7 @@ class ReActLoop:
         session_manager: SessionManager,
         context_manager: ContextManager,
         max_turns: int = 50,
-        history_budget: int = 16000,
+        history_budget: int = 32000,
         mcp_manager: Any | None = None,
         task_planner: Any | None = None,
         reliability_engine: ReliabilityEngine | None = None,
@@ -217,18 +223,16 @@ class ReActLoop:
             if estimate_messages_tokens(messages) > int(self.history_budget * 0.45):
                 messages = prune_tool_observations(messages, keep_recent_messages=24)
 
-            # Compact history only if approaching token limit
-            compaction_threshold = max(6000, int(self.history_budget * 0.75))
-            should_compact = estimate_messages_tokens(messages) > compaction_threshold or (
-                turns > 20 and estimate_messages_tokens(messages) > int(self.history_budget * 0.5)
-            )
+            # Compact history only if approaching token limit (75% threshold)
+            compaction_threshold = max(8000, int(self.history_budget * 0.75))
+            should_compact = estimate_messages_tokens(messages) > compaction_threshold
             if should_compact:
                 messages = compact_history_smart(
                     messages=messages,
                     keeper=self.keeper,
-                    max_tokens=int(self.history_budget * 0.5),
+                    max_tokens=int(self.history_budget * 0.60),
                     current_goal=user_input,
-                    keep_recent=8,
+                    keep_recent=12,
                 )
                 self.session_manager.replace_history(messages[1:])
                 seen_tool_outputs.clear()
@@ -294,12 +298,12 @@ class ReActLoop:
                         if d.get("function", {}).get("name") not in {"web_search", "web_fetch"}
                     ]
 
-            # PLAN mode: expose only read-only tools to the LLM
+            # PLAN mode: expose read-only tools and git to the LLM
             if tool_definitions and self.permission_gate.mode == Mode.PLAN:
                 tool_definitions = [
                     d
                     for d in tool_definitions
-                    if d.get("function", {}).get("name") in READ_ONLY_TOOLS
+                    if d.get("function", {}).get("name") in PLAN_EXPOSED_TOOLS
                 ]
             agent_resp: AgentResponse | None = None
 
@@ -335,6 +339,25 @@ class ReActLoop:
 
             # 5. If no tool calls, response is complete!
             if not raw_tool_calls:
+                # Truncation check: if response hit max_tokens, do not exit prematurely
+                is_truncated = (
+                    agent_resp.finish_reason in {"length", "max_tokens"}
+                    or (
+                        isinstance(getattr(agent_resp, "completion_tokens", None), int)
+                        and agent_resp.completion_tokens >= 7000
+                        and not agent_resp.content.strip()
+                    )
+                )
+                if is_truncated and turns < self.max_turns - 1:
+                    log.warning("Agent output truncated by max_tokens limit with no complete tool calls")
+                    self.session_manager.add_message("assistant", agent_resp.content or "(Output truncated)")
+                    self.session_manager.add_message(
+                        "user",
+                        "[System Output Truncation Notice]: Your previous response reached the maximum output token limit (max_tokens) "
+                        "and was truncated before finishing. Please continue your response or execution from where you left off.",
+                    )
+                    continue
+
                 # Goal verification check: make sure planned tasks or unverified changes are checked
                 sub_tool = self.tool_engine.get_tool("subagent") if self.tool_engine else None
                 sub_pool = getattr(sub_tool, "subagent_pool", None)
@@ -413,14 +436,33 @@ class ReActLoop:
                 self.prompt_assembler.record_tool_use(tool_name)
 
                 # Permission gating
-                if self.permission_gate.mode == Mode.PLAN and tool_name not in READ_ONLY_TOOLS:
+                if tc.get("truncated") or (isinstance(args, dict) and args.get("_truncated")):
                     res = ToolResult(
                         name=tool_name,
                         output=(
-                            f"Error: Tool '{tool_name}' is blocked in PLAN mode. "
-                            f"PLAN mode is read-only — switch mode (e.g. /mode normal) "
-                            f"to execute this tool."
+                            f"Error: Tool '{tool_name}' call was cut off by the model's max_tokens limit. "
+                            f"Arguments are incomplete and the tool was not executed to prevent data corruption. "
+                            f"Please re-try the action with shorter arguments or break the operation into smaller chunks."
                         ),
+                        success=False,
+                    )
+                elif self.permission_gate.mode == Mode.PLAN and not is_plan_mode_allowed(tool_name, args):
+                    if tool_name == "git":
+                        action_str = args.get("action", "") if isinstance(args, dict) else ""
+                        msg = (
+                            f"Error: Git action '{action_str}' modifies repository state and is blocked in PLAN mode. "
+                            f"Only read-only git actions (status, diff, log, branch) are allowed in PLAN mode. "
+                            f"To execute changes, switch out of PLAN mode (e.g. /execute or /mode normal)."
+                        )
+                    else:
+                        msg = (
+                            f"Error: Tool '{tool_name}' is blocked in PLAN mode. "
+                            f"PLAN mode is read-only (only read-only tools and writes to .isli/PLAN.md are allowed). "
+                            f"To execute changes, switch mode with /execute or /mode normal."
+                        )
+                    res = ToolResult(
+                        name=tool_name,
+                        output=msg,
                         success=False,
                     )
                 elif self.permission_gate.is_denied(tool_name, args):

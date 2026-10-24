@@ -14,8 +14,9 @@ def test_model_catalog():
     """Verify default catalog models are configured."""
     assert "smollm2-135m" in MODEL_CATALOG
     assert "qwen3-0.6b" in MODEL_CATALOG
+    assert "qwen3-0.6b-isli" in MODEL_CATALOG
     assert "qwen2.5-coder-1.5b" in MODEL_CATALOG
-    assert DEFAULT_MODEL == "qwen3-0.6b"
+    assert DEFAULT_MODEL == "qwen3-0.6b-isli"
 
 
 def test_disabled_keeper_graceful_degradation():

@@ -166,14 +166,35 @@ def render_token_bar(
     sub_tokens = summary.get("subagent_total_tokens", 0)
     sub_str = f" (🤖{sub_tokens:,})" if sub_tokens > 0 else ""
 
-    # Responsive compact layout on narrower terminals (< 105 cols)
-    if terminal_width < 105:
+    # Responsive tiers:
+    # Tier 1 (< 100 cols): Ultra-compact for narrow terminals
+    if terminal_width < 100:
         return (
             f"[bold cyan]{escape(f'[{folder_name}]')}[/bold cyan] [dim]|[/dim] "
             f"{mode_badge(mode)} [dim]|[/dim]{keeper_badge}{tasks_badge} "
             f"[dim]Ctx:[/dim] [cyan]{pct}%[/cyan] [dim]| Cost: ${cost:.4f}[/dim]"
         )
 
+    # Tier 2 (100 - 139 cols): Compact model + tokens, no full progress bar
+    if terminal_width < 140:
+        return (
+            f"[bold cyan]{escape(f'[{folder_name}]')}[/bold cyan] [dim]|[/dim] "
+            f"{mode_badge(mode)} [dim]|[/dim]{keeper_badge}{tasks_badge} "
+            f"[dim]{escape(model_name)} | Ctx:[/dim] [cyan]{pct}%[/cyan] [dim]| "
+            f"Tokens: {used:,}{sub_str} | Cost: ${cost:.4f}[/dim]"
+        )
+
+    # Tier 3 (140 - 169 cols): Detailed with context counts and cache stats
+    if terminal_width < 170:
+        return (
+            f"[bold cyan]{escape(f'[{folder_name}]')}[/bold cyan] [dim]|[/dim] "
+            f"{mode_badge(mode)} [dim]|[/dim]{keeper_badge}{tasks_badge}{loop_badge} "
+            f"[dim]{escape(model_name)} |[/dim] "
+            f"[dim]Ctx: {pct}% ({active_tokens:,}/{budget:,}) | "
+            f"Tokens: {used:,}{sub_str}{cached_str} | Cost: ${cost:.4f}[/dim]"
+        )
+
+    # Tier 4 (>= 170 cols): Full width with visual 10-char progress bar
     return (
         f"[bold cyan]{escape(f'[{folder_name}]')}[/bold cyan] [dim]|[/dim] "
         f"{mode_badge(mode)} [dim]|[/dim]{keeper_badge}{tasks_badge}{loop_badge} "

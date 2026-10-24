@@ -93,7 +93,12 @@ ehthumbs.db
 .isli/cache.db-journal
 .isli/models/
 .isli/history.txt
+.isli/PLAN.md
+.isli/plan.md
 .pytest_tmp/
+
+# Fine-tuning model weights & artifacts
+scripts/finetune_keeper/output/
 
 # Local Developer / AI Assistant Configs
 GEMINI.md

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -435,8 +436,26 @@ def print_banner(
     )
 
 
+def configure_logging() -> None:
+    """Configure persistent rotating file logging for ISLI and prevent raw sys.stderr leaks."""
+    log_dir = Path.home() / ".isli" / "logs"
+    with contextlib.suppress(Exception):
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "isli.log"
+        handler = logging.FileHandler(str(log_file), encoding="utf-8", delay=True)
+        handler.setFormatter(
+            logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
+        )
+        isli_logger = logging.getLogger("isli")
+        isli_logger.setLevel(logging.DEBUG)
+        if not any(isinstance(h, logging.FileHandler) for h in isli_logger.handlers):
+            isli_logger.addHandler(handler)
+        isli_logger.propagate = False
+
+
 def main() -> None:
     """Main CLI entrypoint."""
+    configure_logging()
     parser = argparse.ArgumentParser(description="ISLI — AI coding CLI with local intelligence")
     parser.add_argument("prompt", nargs="*", help="Optional initial query to execute")
     parser.add_argument(
@@ -648,14 +667,23 @@ def main() -> None:
 
         # Handle slash commands
         if user_input.startswith("/"):
-            if user_input.strip().split()[0].lower() == "/clear":
+            cmd_lower = user_input.strip().split()[0].lower()
+            if cmd_lower == "/clear":
                 with contextlib.suppress(Exception):
                     console.clear()
                 print_banner(config, project_root, loop.permission_gate.mode, mcp_manager)
             res = commands.handle(user_input)
             if res:
                 console.print(res)
-            continue
+            # If /plan with a goal was provided, proceed directly into agent planning turn
+            if cmd_lower == "/plan" and len(user_input.strip().split(maxsplit=1)) > 1:
+                goal = user_input.strip().split(maxsplit=1)[1].strip()
+                user_input = f"Explore the workspace and create a comprehensive step-by-step implementation plan for: {goal}"
+            # If /execute or /apply was run, proceed directly into execution turn
+            elif cmd_lower in {"/execute", "/apply"}:
+                user_input = "The plan is approved. Proceed to execute the tasks starting with task 1."
+            else:
+                continue
 
         # Execute agent query
         try:

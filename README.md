@@ -8,15 +8,17 @@
 
 Standalone AI coding CLI with a **dual-model architecture**:
 - **Cloud Reasoning Brain**: Any cloud model via LiteLLM (Claude 3.5/3.7 Sonnet, GPT-4o, Gemini 2.5, OpenRouter, Ollama).
-- **Embedded Local Keeper SLM**: Configurable small GGUF model (`qwen3-0.6b` default, `smollm2-135m`, `qwen2.5-coder-1.5b`) running via `llama-cpp-python` as an intelligence layer inside every tool with **GPU VRAM offloading by default**.
+- **Embedded Local Keeper SLM**: Configurable small GGUF model (`qwen3-0.6b-isli` fine-tuned default, `qwen3-0.6b`, `smollm2-135m`, `qwen2.5-coder-1.5b`) running via `llama-cpp-python` as an intelligence layer inside every tool with **GPU VRAM offloading by default**.
 
 ---
 
 ## Key Features
 
-1. **Dual-Model Architecture**:
+1. **Dual-Model Architecture & Custom Fine-Tuned Keeper SLM**:
    - Cloud LLM handles high-level reasoning and multi-step planning.
-   - Local Keeper SLM pre-processes tool inputs and outputs (extracts relevant excerpts, validates code edits, ranks search results, summarizes diffs and command outputs).
+   - Local Keeper SLM (`qwen3-0.6b-isli`, `Qwen3-0.6B-ISLI-Keeper-Q8_0.gguf`) is fine-tuned specifically for ISLI using frontier teacher knowledge distillation across all 6 Keeper tasks (`summarize`, `parse`, `extract`, `rank`, `classify`, `validate`).
+   - GBNF grammar constraints guarantee valid JSON arrays (`rank`), JSON objects (`validate`), and single-token classification (`classify`).
+   - Pre-flight token gating compresses verbose build/test outputs over 900 tokens by 80–90% while keeping code reads 100% lossless up to 8,000 tokens.
    - Drastically cuts cloud token expenditure (50% to 70%) and latency while maintaining accurate code understanding.
 2. **12 Smart Tools & Native MCP**:
    - `read`: Reads files with line numbers; extracts focused excerpts on large files via Keeper; introspects binary images (`PNG`, `JPEG`, `GIF`, `BMP`, `WEBP`) with dimensions and format.

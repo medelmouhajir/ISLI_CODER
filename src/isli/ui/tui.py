@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import queue
 import threading
 from collections.abc import Callable
@@ -76,6 +77,35 @@ class Block:
     output: str = ""
     diff: str = ""
     expanded: bool = False
+
+
+class _TuiLogHandler(logging.Handler):
+    """Capture warnings and errors and queue them as visible blocks in the TUI without corrupting terminal."""
+
+    def __init__(self, ui_queue: queue.Queue[tuple[str, Any]]) -> None:
+        super().__init__(level=logging.WARNING)
+        self.ui_queue = ui_queue
+        self._seen: set[str] = set()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+            if not msg or msg in self._seen:
+                return
+            self._seen.add(msg)
+            if len(self._seen) > 100:
+                self._seen.clear()
+
+            from rich.markup import escape
+
+            clean_msg = escape(msg[:300])
+            if record.levelno >= logging.ERROR:
+                block_content = f"[bold red]✗ {escape(record.name)}:[/bold red] [red]{clean_msg}[/red]"
+            else:
+                block_content = f"[bold yellow]⚠ {escape(record.name)}:[/bold yellow] [dim yellow]{clean_msg}[/dim yellow]"
+            self.ui_queue.put(("system", block_content))
+        except Exception:
+            pass
 
 
 def _block_renderable(block: Block) -> Any:
@@ -241,8 +271,12 @@ class ConversationView:
 
     def _last_width(self) -> int:
         if self.window is not None and self.window.render_info is not None:
-            return max(20, self.window.render_info.window_width)
-        return 80
+            # Leave 1 column safety margin so Rich borders never hit the right-most
+            # terminal buffer column, completely preventing VT100 autowrap on Windows
+            return max(20, self.window.render_info.window_width - 1)
+        import shutil
+
+        return max(20, shutil.get_terminal_size((80, 24)).columns - 1)
 
     def _render_text(self, width: int) -> str:
         if self._cached_version == self._version and self._cached_width == width:
@@ -291,11 +325,16 @@ class ConversationView:
         height = self._last_height()
         text = self._render_text(self._last_width())
         lines = text.split("\n")
+        while lines and not lines[-1]:
+            lines.pop()
         total = len(lines)
+        if total == 0:
+            return ""
         if not self.user_scrolled:
             self.scroll_offset = max(0, total - height)
         start = min(self.scroll_offset, max(0, total - 1))
-        return "\n".join(lines[start : start + height])
+        slice_lines = lines[start : start + height]
+        return "\n".join(slice_lines)
 
 
 class ConversationWindow(Window):
@@ -305,8 +344,9 @@ class ConversationWindow(Window):
         self.view = view
         super().__init__(
             content=FormattedTextControl(lambda: ANSI(view.visible_text())),
-            wrap_lines=True,
+            wrap_lines=False,
             always_hide_cursor=True,
+            dont_extend_height=False,
         )
         view.window = self
 
@@ -651,13 +691,26 @@ class IsliTui:
         self.status_control = FormattedTextControl(self._status_text)
         self.help_control = FormattedTextControl(self._help_text)
         self.task_banner_control = FormattedTextControl(self._task_banner_text)
-        self.status_window = Window(self.status_control, height=1)
+        self.status_window = Window(
+            self.status_control,
+            height=1,
+            wrap_lines=False,
+            dont_extend_height=True,
+        )
         self.task_banner_window = Window(
             self.task_banner_control,
             height=self._task_banner_window_height,
+            wrap_lines=False,
+            dont_extend_height=True,
             style="class:task_banner",
         )
-        self.help_window = Window(self.help_control, height=1, style="class:helpbar")
+        self.help_window = Window(
+            self.help_control,
+            height=1,
+            wrap_lines=False,
+            dont_extend_height=True,
+            style="class:helpbar",
+        )
         self.float_container = FloatContainer(
             content=HSplit(
                 [
@@ -706,8 +759,6 @@ class IsliTui:
         original_excepthook = threading.excepthook
 
         def _suppress_thread_traceback(args: Any) -> None:
-            import logging
-
             logging.getLogger("isli.tui").error(
                 "Exception in thread %s: %s",
                 args.thread.name,
@@ -717,6 +768,9 @@ class IsliTui:
 
         threading.excepthook = _suppress_thread_traceback
         set_full_screen_tui_active(True)
+        tui_log_handler = _TuiLogHandler(self._ui_queue)
+        isli_logger = logging.getLogger("isli")
+        isli_logger.addHandler(tui_log_handler)
         try:
             self.app = Application(
                 layout=Layout(self.float_container),
@@ -727,6 +781,8 @@ class IsliTui:
             )
             self.app.run(pre_run=self._pre_run)
         finally:
+            with contextlib.suppress(Exception):
+                isli_logger.removeHandler(tui_log_handler)
             set_full_screen_tui_active(False)
             threading.excepthook = original_excepthook
 
@@ -745,6 +801,9 @@ class IsliTui:
 
     # -- status / help bars -------------------------------------------
     def _status_text(self) -> Any:
+        width = self._status_width()
+        spinner_res = 14 if self.streaming else 0
+        avail_width = max(20, width - spinner_res)
         markup = render_token_bar(
             self.loop.agent,
             self.config.behavior.history_budget,
@@ -753,24 +812,27 @@ class IsliTui:
             self.loop.permission_gate.mode,
             loop_scheduler=getattr(self.commands, "loop_scheduler", None),
             keeper=getattr(self.loop, "keeper", None),
-            terminal_width=self._status_width(),
+            terminal_width=avail_width,
         )
         if self.streaming:
             frame = SPINNER_FRAMES[self._spinner_idx % len(SPINNER_FRAMES)]
             markup += f" [bold yellow]{frame} working…[/bold yellow]"
-        return ANSI(self._render_markup(markup, self._status_width()))
+        return ANSI(self._render_markup(markup, width))
 
     def _status_width(self) -> int:
         if self.status_window.render_info is not None:
             return max(20, self.status_window.render_info.window_width)
-        return 80
+        import shutil
+
+        return max(20, shutil.get_terminal_size((80, 24)).columns)
 
     def _render_markup(self, markup: str, width: int) -> str:
         console = self._markup_console
-        console.width = width
+        console.width = max(20, width)
         console.begin_capture()
-        console.print(markup)
-        return console.end_capture()
+        console.print(markup, end="", soft_wrap=True)
+        rendered = console.end_capture()
+        return rendered.split("\n")[0].rstrip("\r\n")
 
     def _help_text(self) -> str:
         scroll_indicator = ""
@@ -782,6 +844,9 @@ class IsliTui:
                 f"[bold green][Queued: {len(self._pending_prompts)} prompt(s)][/bold green] · "
             )
         interrupt_hint = "Esc interrupt" if self.streaming else "Esc/Ctrl+C interrupt"
+        width = self._status_width()
+        if width < 100:
+            return f" {scroll_indicator}{queue_indicator}Enter submit · Shift+Tab mode · {interrupt_hint} · /help"
         return (
             f" {scroll_indicator}{queue_indicator}"
             f"Enter submit/queue · Alt+Enter newline · Shift+Tab mode · "
@@ -815,12 +880,21 @@ class IsliTui:
         from rich.markup import escape
 
         tid, subj, act, done, total = info
-        act_str = f" [dim italic]({escape(act)})[/dim italic]" if act else ""
+        width = self._status_width()
+        max_subj_len = max(20, width - 40)
+        if len(subj) > max_subj_len:
+            subj = subj[: max_subj_len - 1] + "…"
+        act_str = ""
+        if act:
+            max_act_len = max(10, width - len(subj) - 30)
+            if len(act) > max_act_len:
+                act = act[: max_act_len - 1] + "…"
+            act_str = f" [dim italic]({escape(act)})[/dim italic]"
         markup = (
             f" [bold yellow]► Task [{tid}/{total}][/bold yellow] "
             f"[bold white]{escape(subj)}[/bold white]{act_str}"
         )
-        return ANSI(self._render_markup(markup, self._status_width()))
+        return ANSI(self._render_markup(markup, width))
 
     # -- input --------------------------------------------------------
     def _get_line_prefix(self, line_number: int, wrap_count: int) -> StyleAndTextTuples:
@@ -907,6 +981,17 @@ class IsliTui:
             self.model_name = self.config.agent.model.split("/")[-1]
             self.view.add(Block("command", res))
             self._invalidate()
+
+        # If /plan with a goal was provided, trigger agent planning turn
+        if cmd == "/plan" and len(text.strip().split(maxsplit=1)) > 1:
+            goal = text.strip().split(maxsplit=1)[1].strip()
+            self._start_agent(f"Explore the workspace and create a comprehensive step-by-step implementation plan for: {goal}")
+            return
+
+        # If /execute or /apply was run, trigger task execution turn
+        if cmd in {"/execute", "/apply"}:
+            self._start_agent("The plan is approved. Proceed to execute the tasks starting with task 1.")
+            return
 
     # -- agent loop (background thread) -------------------------------
     def _start_agent(self, text: str) -> None:

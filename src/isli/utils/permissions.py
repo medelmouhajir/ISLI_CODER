@@ -16,8 +16,24 @@ from typing import Any
 ALWAYS_ALLOW = {"read", "grep", "glob", "code_search", "todo", "ask_user", "web_search", "web_fetch", "skill"}
 REQUIRE_APPROVAL = {"write", "edit", "bash", "git", "skill_manage"}
 READ_ONLY_TOOLS = {"read", "grep", "glob", "code_search", "todo", "ask_user", "web_search", "web_fetch", "skill"}
+READ_ONLY_GIT_ACTIONS = {"status", "diff", "log", "branch"}
+PLAN_ALLOWED_WRITE_FILES = {".isli/plan.md", ".isli/PLAN.md", "plan.md", "PLAN.md"}
+PLAN_EXPOSED_TOOLS = READ_ONLY_TOOLS | {"git"}
 MCP_PREFIX = "mcp__"
 CUSTOM_PREFIX = "custom__"
+
+
+def is_plan_mode_allowed(tool_name: str, arguments: dict[str, Any] | None = None) -> bool:
+    """Check if a specific tool invocation is permissible in PLAN mode."""
+    if tool_name in READ_ONLY_TOOLS:
+        return True
+    if tool_name == "git":
+        action = (arguments or {}).get("action", "") if isinstance(arguments, dict) else ""
+        return action in READ_ONLY_GIT_ACTIONS
+    if tool_name in {"write", "edit"}:
+        path = str((arguments or {}).get("path", "") if isinstance(arguments, dict) else "").replace("\\", "/").strip().lower()
+        return any(path.endswith(f.lower()) for f in PLAN_ALLOWED_WRITE_FILES)
+    return False
 
 
 def _matches_any(name: str, patterns: set[str]) -> bool:
@@ -165,9 +181,9 @@ class PermissionGate:
         if self.mode == Mode.ROBOT:
             return False
 
-        # PLAN mode: only read-only tools may run; everything else needs approval.
-        if self.mode == Mode.PLAN and tool_name not in READ_ONLY_TOOLS:
-            return True
+        # PLAN mode: allow read-only tools, read-only git actions, and plan file writes.
+        if self.mode == Mode.PLAN:
+            return not is_plan_mode_allowed(tool_name, arguments)
 
         # Custom tools: trust is hash-pinned; session grants are NOT honored
         if tool_name.startswith(CUSTOM_PREFIX):

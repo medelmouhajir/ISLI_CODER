@@ -9,7 +9,7 @@ def test_load_config_defaults(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cfg = load_config(project_root=tmp_path)
     assert cfg.agent.model == "openrouter/anthropic/claude-sonnet-4.5"
-    assert cfg.keeper.model_name == "qwen3-0.6b"
+    assert cfg.keeper.model_name == "qwen3-0.6b-isli"
     assert cfg.keeper.n_gpu_layers == -1
     assert cfg.keeper.device == "auto"
     assert cfg.behavior.context_budget == 800

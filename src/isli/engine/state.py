@@ -44,6 +44,7 @@ class ErrorCategory(str, Enum):
     SYNTAX_ERROR = "syntax_error"
     PERMISSION_DENIED = "permission_denied"
     SCHEMA_ERROR = "schema_error"
+    OUTPUT_TRUNCATED = "output_truncated"
     UNKNOWN = "unknown"
 
 
@@ -137,6 +138,7 @@ class ActionSignature:
     fingerprint: str
     success: bool = True
     output_hash: str = ""
+    target_label: str = ""
 
 
 @dataclass
@@ -305,6 +307,14 @@ class ExecutionState:
         sig = hashlib.sha1(normalized_str.encode("utf-8", errors="replace")).hexdigest()[:16]
         out_sig = hashlib.sha1(output.encode("utf-8", errors="replace")).hexdigest()[:12] if output else ""
 
+        target_label = str(
+            args.get("path")
+            or args.get("file_path")
+            or args.get("command")
+            or args.get("pattern")
+            or ""
+        )[:60]
+
         self.stuck_state.action_history.append(
             ActionSignature(
                 turn=self.turn,
@@ -312,6 +322,7 @@ class ExecutionState:
                 fingerprint=sig,
                 success=success,
                 output_hash=out_sig,
+                target_label=target_label,
             )
         )
 

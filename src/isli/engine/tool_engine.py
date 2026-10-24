@@ -130,9 +130,10 @@ class ToolEngine:
             if name in {"write", "edit", "patch"}:
                 self._search_generation += 1
             raw_tokens = count_tokens(output)
+            tool_metadata = getattr(tool, "last_metadata", {}) or {}
 
             # Pre-flight token gate: compress before spilling or passing to cloud
-            output = self._pre_flight_gate(name, output, raw_tokens)
+            output = self._pre_flight_gate(name, output, raw_tokens, tool_metadata)
 
             # Hybrid threshold spill for large tool outputs
             if len(output) > self.spill_threshold:
@@ -180,12 +181,19 @@ class ToolEngine:
             log.warning(f"Tool {name} failed: {e}")
             return ToolResult(name=name, output=error, success=False, latency_ms=latency)
 
-    def _pre_flight_gate(self, tool_name: str, output: str, tokens: int) -> str:
+    def _pre_flight_gate(
+        self,
+        tool_name: str,
+        output: str,
+        tokens: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         """Progressively compress output using Keeper to fit token budget."""
         # Code inspection and diff tools MUST NEVER be converted to SLM prose summaries,
         # which destroy line numbers, CSS/code syntax, and exact contents.
         no_summarize_tools = {"read", "patch", "edit", "write", "todo", "ask_user", "tasks"}
-        if tool_name in no_summarize_tools:
+        is_file_view = bool(metadata and metadata.get("is_file_view"))
+        if tool_name in no_summarize_tools or is_file_view:
             if tokens > 8000:
                 truncated = head_tail(output, 8000)
                 return (
@@ -194,7 +202,9 @@ class ToolEngine:
                 )
             return output
 
-        if tokens <= 2000:
+        # Fits comfortably — pass through untouched (900-token threshold for noisy bash logs)
+        pass_through_limit = 900 if tool_name == "bash" else 2000
+        if tokens <= pass_through_limit:
             return output
 
         # Skip if already compressed by Keeper inside the tool

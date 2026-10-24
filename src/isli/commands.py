@@ -26,6 +26,8 @@ COMMAND_HELP = """
   [green]/pwd[/green]               Display current working directory, git branch, and stats
   [green]/tree[/green]              Display global minimal view tree of the workspace
   [green]/memory[/green]            View project instructions from ISLI.md
+  [green]/plan [goal][/green]        Switch to read-only PLAN mode and optionally initiate planning
+  [green]/execute [flags][/green]   Approve plan, switch to NORMAL (or AUTO with --auto), and execute
   [green]/tasks[/green]             View and manage plan tasks (alias: /todo)
 
 [bold yellow]Scheduler & Automation:[/bold yellow]
@@ -367,9 +369,11 @@ class CommandHandler:
             status = "ready" if self.keeper.available else "idle/unloaded"
             usage = self.keeper.usage_summary()
             dev_str = usage.get("device", "CPU (RAM)")
+            from isli.engine.keeper_client import MODEL_CATALOG
+
             lines = [
-                f"Current Keeper model: [bold]{self.keeper.config.model_name}[/bold] "
-                f"(status: {status})",
+                f"Current Keeper model: [bold green]{self.keeper.config.model_name}[/bold green] "
+                f"(status: [bold]{status}[/bold])",
                 "[bold cyan]Keeper Telemetry:[/bold cyan]",
                 f"  |-- Device:         [bold green]{dev_str}[/bold green]",
                 f"  |-- Calls:          [dim]{usage['calls']}[/dim]",
@@ -380,6 +384,12 @@ class CommandHandler:
             ]
             if usage["last_error"]:
                 lines.append(f"  |-- Last Error:     [red]{usage['last_error']}[/red]")
+
+            lines.append("\n[bold cyan]Available Models:[/bold cyan]")
+            for m_key, m_info in MODEL_CATALOG.items():
+                active_mark = " [bold green]* (active)[/bold green]" if m_key == self.keeper.config.model_name else ""
+                lines.append(f"  - [bold]{m_key}[/bold]{active_mark}: [dim]{m_info.get('description', '')}[/dim]")
+            lines.append("\n[dim]To switch Keeper model, run:[/dim] [bold green]/keeper <name>[/bold green]")
             return "\n".join(lines)
 
         if cmd == "/clear":
@@ -554,6 +564,42 @@ class CommandHandler:
                     f"[bold green]~{stats['total_tokens_saved']:,} tokens[/bold green]"
                 )
             return "[yellow]Cache stats not available.[/yellow]"
+
+        if cmd == "/plan":
+            from isli.utils.permissions import Mode
+
+            self.permission_gate.set_mode(Mode.PLAN)
+            if arg:
+                return (
+                    f"[bold yellow]Switched to PLAN mode (read-only).[/bold yellow]\n"
+                    f"[cyan]Goal:[/cyan] {arg}\n"
+                    f"[dim]Only read-only tools, read-only git actions (status/diff/log), and .isli/PLAN.md writes are permitted.\n"
+                    f"To begin planning, send: [bold]{arg}[/bold]\n"
+                    f"When ready to execute, run: [bold]/execute[/bold][/dim]"
+                )
+            return (
+                "[bold yellow]Switched to PLAN mode (read-only).[/bold yellow]\n"
+                "[dim]Only read-only tools, read-only git actions (status/diff/log), and .isli/PLAN.md writes are permitted.\n"
+                "Enter your request to explore and generate an implementation plan.\n"
+                "When ready to execute, run: [bold]/execute[/bold] (or [bold]/mode normal[/bold])[/dim]"
+            )
+
+        if cmd in {"/execute", "/apply"}:
+            from isli.utils.permissions import Mode
+
+            target_mode = Mode.AUTO if "--auto" in arg.lower() else Mode.NORMAL
+            prev_mode = self.permission_gate.mode
+            self.permission_gate.set_mode(target_mode)
+
+            tasks_info = ""
+            if self.planner and self.planner.get_tasks():
+                tasks_info = f"\n[dim]Active tasks ({self.planner.summary()}):[/dim]\n{self.planner.render_markdown()}"
+
+            return (
+                f"[bold green]Plan Approved! Switched from {prev_mode.value.upper()} to {target_mode.value.upper()} mode.[/bold green]\n"
+                f"[dim]State-changing tools (write, edit, patch, bash) are now enabled.{tasks_info}\n"
+                f"To begin task execution, send: [bold]Proceed with execution[/bold][/dim]"
+            )
 
         if cmd == "/mode":
             from isli.ui.prompts import (

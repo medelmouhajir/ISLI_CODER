@@ -19,7 +19,7 @@ except ImportError:
     tomli_w = None  # type: ignore
 
 from isli.engine.agent_client import AgentConfig
-from isli.engine.keeper_client import KeeperConfig
+from isli.engine.keeper_client import DEFAULT_MODEL, KeeperConfig
 from isli.utils.permissions import ALWAYS_ALLOW, REQUIRE_APPROVAL
 
 
@@ -55,7 +55,7 @@ class BehaviorConfig:
 
     context_budget: int = 1200
     max_turns: int = 50
-    history_budget: int = 16000
+    history_budget: int = 32000
     cache_ttl: int = 300
     tree_max_lines: int = 50
     subagent_enabled: bool = True
@@ -214,7 +214,7 @@ def load_config(
     )
 
     keeper_cfg = KeeperConfig(
-        model_name=keeper_data.get("model_name", "qwen3-0.6b"),
+        model_name=keeper_data.get("model_name", DEFAULT_MODEL),
         model_path=keeper_data.get("model_path"),
         model_repo=keeper_data.get("model_repo"),
         model_file=keeper_data.get("model_file"),
@@ -233,7 +233,7 @@ def load_config(
     behavior_cfg = BehaviorConfig(
         context_budget=behavior_data.get("context_budget", 800),
         max_turns=behavior_data.get("max_turns", 50),
-        history_budget=behavior_data.get("history_budget", 16000),
+        history_budget=behavior_data.get("history_budget", 32000),
         cache_ttl=behavior_data.get("cache_ttl", 300),
         subagent_enabled=behavior_data.get("subagent_enabled", True),
         max_concurrent_subagents=behavior_data.get("max_concurrent_subagents", 3),

@@ -57,6 +57,12 @@ class TasksTool(BaseTool):
                             "Number of output lines to read (default 100, for 'output' action on shell tasks)"
                         ),
                     },
+                    "wait_seconds": {
+                        "type": "integer",
+                        "description": (
+                            "Optional seconds to wait for output or job completion (max 30s) before reading"
+                        ),
+                    },
                 },
                 "required": ["action"],
             },
@@ -94,6 +100,24 @@ class TasksTool(BaseTool):
         if action == "output":
             if not task_id:
                 return "Error: 'task_id' is required for action='output'."
+            wait_seconds = min(30, max(0, int(kwargs.get("wait_seconds", 0) or 0)))
+            if wait_seconds > 0:
+                import time
+
+                deadline = time.time() + wait_seconds
+                while time.time() < deadline:
+                    if self.subagent_pool and (
+                        task_id.startswith("sub_") or self.subagent_pool.get_job(task_id) is not None
+                    ):
+                        job = self.subagent_pool.get_job(task_id)
+                        if job and job.status in {"completed", "failed", "cancelled"}:
+                            break
+                    else:
+                        task = self.bg.get_task(task_id)
+                        if task and not task.alive:
+                            break
+                    time.sleep(min(0.5, max(0.05, deadline - time.time())))
+
             if self.subagent_pool and (
                 task_id.startswith("sub_") or self.subagent_pool.get_job(task_id) is not None
             ):

@@ -276,3 +276,57 @@ def test_tui_installs_thread_excepthook(tmp_path, monkeypatch):
     tui.run()
     assert hook_during_run == [True]
     assert threading.excepthook is original
+
+
+def test_tui_layout_and_markup_single_line_safety(tmp_path, monkeypatch):
+    """Verify status, task banner, and help windows have wrap_lines=False and _render_markup strictly yields 1 line."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    tui = _make_tui(tmp_path)
+
+    # 1. Window nowrap verification (prompt_toolkit converts bool to Filter)
+    assert not tui.status_window.wrap_lines()
+    assert not tui.task_banner_window.wrap_lines()
+    assert not tui.help_window.wrap_lines()
+    assert not tui.conversation_window.wrap_lines()
+
+    # 2. _render_markup single line guarantee even with long content
+    long_markup = "[bold red]Very long message that exceeds terminal width[/bold red] " * 10
+    single_line = tui._render_markup(long_markup, width=40)
+    assert "\n" not in single_line
+    assert "\r" not in single_line
+
+
+def test_render_token_bar_responsive_tiers():
+    """Verify responsive tiers adjust length appropriately for widths 80, 120, 150, 180."""
+    from unittest.mock import MagicMock
+    from isli.ui.prompts import render_token_bar
+    import re
+
+    agent = MagicMock()
+    agent.usage_summary.return_value = {
+        "total_tokens": 117536,
+        "estimated_cost_usd": 0.0185,
+        "prompt_tokens": 85726,
+        "subagent_prompt_tokens": 0,
+        "cached_tokens": 52224,
+        "last_turn_prompt_tokens": 85726,
+    }
+    agent.config.model = "openrouter/deepseek/deepseek-v4.1-flash"
+
+    def _strip_rich(s: str) -> str:
+        return re.sub(r"\[[^\]]+\]", "", s)
+
+    # Narrow: 80 cols
+    bar_80 = render_token_bar(agent, budget=180000, terminal_width=80)
+    plain_80 = _strip_rich(bar_80)
+    assert len(plain_80) <= 80
+
+    # Medium: 120 cols
+    bar_120 = render_token_bar(agent, budget=180000, terminal_width=120)
+    plain_120 = _strip_rich(bar_120)
+    assert len(plain_120) <= 120
+
+    # Wide: 160 cols
+    bar_160 = render_token_bar(agent, budget=180000, terminal_width=160)
+    plain_160 = _strip_rich(bar_160)
+    assert len(plain_160) <= 160

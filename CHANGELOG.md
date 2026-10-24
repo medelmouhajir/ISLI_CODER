@@ -7,9 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] - 2026-10-24
+
+### Added & Enhanced
+
+#### Interactive Plan Mode & Workflow Alignment
+- **Plan Mode Architecture (`/plan` & `/execute`)**:
+  - Implemented `/plan [goal]` switching the session into read-only `Mode.PLAN` and launching goal-directed workspace exploration.
+  - Added `/execute [--auto]` command to seamlessly approve the active plan, transition into `NORMAL` (or `AUTO`) mode, and initiate execution.
+  - Added `is_plan_mode_allowed()` in `isli.utils.permissions` enforcing read-only tools, read-only git queries (`status`, `diff`, `log`, `branch`), and plan file writes (`.isli/PLAN.md`).
+  - Active plan tasks created via `todo` automatically mirror to `.isli/PLAN.md` upon every mutation (`set`, `add`, `update`, `clear`), with fuzzy subject matching when `task_id` is omitted.
+
+#### Partial-Batch Truncation Resilience
+- **Multi-Tool Max Tokens Protection**:
+  - `AgentClient` now detects output token truncation (`finish_reason in {"length", "max_tokens"}`).
+  - In multi-tool turns, earlier fully generated calls remain 100% valid and execute safely on disk, while only the actively cut-off tool call is marked truncated.
+  - `FailureAnalyzer` and `ReliabilityEngine` classify this as `OUTPUT_TRUNCATED` with targeted recovery directives preventing destructive cascade retries.
+
+#### Compaction, Pruning & Environment Hardening
+- **Bulky Historical Write Compaction**:
+  - `prune_tool_observations` compacts bulky historical `write` tool payloads (>50 lines) from earlier turns into concise metadata stubs while keeping recent turns intact.
+  - `_clean_file_path` strips Windows drive letters (`X:/`) and collapses repo-relative anchors (`Private/.../src/app.ts` -> `src/app.ts`).
+  - Doubled default `history_budget` from 16,000 to 32,000 tokens.
+- **Keeper Hard Safety & Parser Status Hints**:
+  - Hard deterministic safety regex in `KeeperClient.classify_tool_call` catches catastrophic commands (`rm -rf`, `format`, `git reset --hard`) and sensitive path modifications (`.git/`, `.ssh/`, `.env`) before invoking the SLM.
+  - `parse_output` passes `return_code` status hints and preserves exact pass/fail counts from test runners without false-positive failures.
+  - Added `wait_seconds` to `TasksTool` for synchronous waiting without busy-polling.
+
+---
+
 ## [0.3.0] - 2026-10-22
 
 ### Added & Enhanced
+
+#### Fine-Tuned Keeper SLM (`qwen3-0.6b-isli`) & Token Reduction
+- **Custom Fine-Tuned Local Model (`Qwen3-0.6B-ISLI-Keeper-Q8_0.gguf`)**:
+  - Fine-tuned `Qwen/Qwen3-0.6B` with `bf16` precision using teacher knowledge distillation from forensic agent sessions across all 6 Keeper tasks (`summarize`, `parse`, `extract`, `rank`, `classify`, `validate`).
+  - Merged LoRA weights and exported directly to a 639.4 MB `Q8_0` GGUF at `~/.isli/models/Qwen3-0.6B-ISLI-Keeper-Q8_0.gguf`.
+  - Promoted `qwen3-0.6b-isli` as the default model in `KeeperClient`, `Config`, and `~/.isli/config.toml` with GPU VRAM acceleration on NVIDIA RTX 3060.
+- **GBNF Grammar Constraints (`LlamaGrammar`)**:
+  - Enforced strict schema outputs for search result ranking (`rank` -> JSON index array `[0, 2, 1]`), code validation (`validate` -> JSON object), and tool safety (`classify` -> `'safe' | 'risky'`) with full Qwen3 think-block compatibility.
+- **Aggressive Pre-Flight Gate for Shell Logs**:
+  - Lowered the compression pass-through limit for non-file-view `bash` outputs from 1,500 tokens to 900 tokens, eliminating context bloat from verbose build, test, and package manager outputs.
+  - Retained 100% lossless reads for code inspection tools (`read`, `patch`, `edit`, `write`, `todo`, and shell code inspections) up to 8,000 tokens.
+- **Fine-Tuning Toolkit (`scripts/finetune_keeper/`)**:
+  - Added `generate_gold_dataset.py`, `build_dataset.py`, `train_keeper_qlora.py`, and `evaluate_keeper.py` for reproducible local fine-tuning and side-by-side GPU benchmarking.
+- **Enhanced `/keeper` Slash Command**:
+  - Interactive terminal output displays live Keeper status, GPU VRAM device mode, telemetry metrics (calls, latency, chars saved), and the full model catalog highlighting the active model.
 
 #### Reliability & Session Health
 - **Automated Stdin / Pager Deadlock Prevention**:
@@ -32,6 +76,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Active Action State Cleanup in `TaskPlanner`**:
   - `update_task` automatically clears `active_action` when transitioning tasks to `"completed"` or `"failed"`.
   - `render_markdown` restricts `*(Active: ...)*` annotations strictly to tasks with `in_progress` status.
+- **Piped Build Error Tail Recovery in `BashTool`**:
+  - `_format_output` detects error markers (`Error:`, `Failed to compile`, `FAIL`, `Traceback`, etc.) across both `stdout` and `stderr`.
+  - Commands piped via `2>&1 | tail -40` (which mask exit codes to 0 and empty `stderr`) now automatically append a 15-line raw error tail containing exact `file:line` references and code frames alongside Keeper's summary.
+- **Multi-Stage Compaction Path Hygiene & Carry-Forward**:
+  - `_clean_file_path` strips unified diff prefixes (`a/`, `b/`), leading symbols (`---`, `./`), web schemas (`//`, `://`), and framework tokens (`Next.js`).
+  - `_deterministic_summary` carries forward `Files created/modified` across multi-stage compactions, and `_format_middle_turn` strips stale `### State Ledger` blocks to prevent SLM echo.
+- **Lossless Tool Immunity in Compaction**:
+  - `compact_history` and `compact_history_smart` exempt lossless code inspection and state tools (`read`, `patch`, `edit`, `write`, `todo`, `ask_user`, `tasks`) in `recent_turns` from the 2,000-char truncation cap, raising it to 8,000 chars.
 - **Binary Image Introspection in `ReadTool`**:
   - Added pure standard-library header inspection for image files (`PNG`, `JPEG`, `GIF`, `BMP`, `WEBP`).
   - Inspecting images now returns structured metadata (format, dimensions, aspect ratio, file size) rather than triggering error failures in `ReliabilityEngine`.

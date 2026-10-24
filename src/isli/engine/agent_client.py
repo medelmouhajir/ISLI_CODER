@@ -295,24 +295,39 @@ class AgentClient:
 
         # Parse tool calls
         tool_calls: list[dict[str, Any]] = []
-        if getattr(choice.message, "tool_calls", None):
-            for tc in choice.message.tool_calls:
-                args = tc.function.arguments
-                if isinstance(args, str):
-                    try:
-                        parsed_args = json.loads(args)
-                    except json.JSONDecodeError:
-                        parsed_args = {"raw": args}
-                else:
-                    parsed_args = args or {}
+        raw_tcs = getattr(choice.message, "tool_calls", None) or []
+        finish_reason = getattr(choice, "finish_reason", None)
+        for i, tc in enumerate(raw_tcs):
+            args = tc.function.arguments
+            is_truncated = False
+            if isinstance(args, str):
+                try:
+                    parsed_args = json.loads(args)
+                except json.JSONDecodeError:
+                    parsed_args = {"raw": args, "_truncated": True}
+                    is_truncated = True
+            else:
+                parsed_args = args or {}
 
-                tool_calls.append(
-                    {
-                        "id": getattr(tc, "id", f"call_{len(tool_calls)}"),
-                        "name": tc.function.name,
-                        "arguments": parsed_args,
-                    }
-                )
+            # If finish_reason indicates token limit reached:
+            # Only the final tool call being generated can be truncated.
+            # Earlier calls that parsed cleanly are complete and valid.
+            if finish_reason in {"length", "max_tokens"} and i == len(raw_tcs) - 1:
+                if is_truncated or not isinstance(parsed_args, dict):
+                    is_truncated = True
+                    if isinstance(parsed_args, dict):
+                        parsed_args["_truncated"] = True
+                    else:
+                        parsed_args = {"raw": str(parsed_args), "_truncated": True}
+
+            call_dict = {
+                "id": getattr(tc, "id", f"call_{len(tool_calls)}"),
+                "name": tc.function.name,
+                "arguments": parsed_args,
+            }
+            if is_truncated:
+                call_dict["truncated"] = True
+            tool_calls.append(call_dict)
 
         raw_content = choice.message.content or ""
         reasoning_content = getattr(choice.message, "reasoning_content", None) or ""
@@ -383,6 +398,7 @@ class AgentClient:
         t0 = time.perf_counter()
         full_content = ""
         stream_reasoning = ""
+        stream_finish_reason = "stop"
         tc_acc: list[dict[str, str]] = []
         stream_prompt_tokens = 0
         stream_completion_tokens = 0
@@ -421,6 +437,9 @@ class AgentClient:
             if not getattr(chunk, "choices", None):
                 continue
             choice = chunk.choices[0]
+            c_finish = getattr(choice, "finish_reason", None)
+            if c_finish:
+                stream_finish_reason = str(c_finish)
             delta = getattr(choice, "delta", None)
             if not delta:
                 continue
@@ -473,19 +492,37 @@ class AgentClient:
         )
 
         parsed_calls: list[dict[str, Any]] = []
-        for tc in tc_acc:
-            if tc["name"]:
-                try:
-                    args = json.loads(tc["arguments"])
-                except json.JSONDecodeError:
-                    args = {"raw": tc["arguments"]}
-                parsed_calls.append(
-                    {
-                        "id": tc["id"] or f"call_{len(parsed_calls)}",
-                        "name": tc["name"],
-                        "arguments": args,
-                    }
-                )
+        named_tcs = [tc for tc in tc_acc if tc.get("name")]
+        num_named = len(named_tcs)
+
+        for i, tc in enumerate(named_tcs):
+            is_truncated = False
+            try:
+                args = json.loads(tc["arguments"])
+            except json.JSONDecodeError:
+                args = {"raw": tc["arguments"], "_truncated": True}
+                is_truncated = True
+
+            # If stream finished due to length/max_tokens limit:
+            # ONLY the tool call actively being generated at the moment of truncation
+            # (the last item in named_tcs) can be truncated. Earlier tool calls whose
+            # JSON parsed cleanly were fully generated and are 100% valid.
+            if stream_finish_reason in {"length", "max_tokens"} and i == num_named - 1:
+                if is_truncated or not isinstance(args, dict):
+                    is_truncated = True
+                    if isinstance(args, dict):
+                        args["_truncated"] = True
+                    else:
+                        args = {"raw": str(args), "_truncated": True}
+
+            call_dict = {
+                "id": tc["id"] or f"call_{len(parsed_calls)}",
+                "name": tc["name"],
+                "arguments": args,
+            }
+            if is_truncated:
+                call_dict["truncated"] = True
+            parsed_calls.append(call_dict)
 
         # Fallback tool parsing from content if provider streamed tools into content
         if not parsed_calls and full_content:
@@ -510,6 +547,7 @@ class AgentClient:
             tool_calls=parsed_calls,
             prompt_tokens=stream_prompt_tokens,
             completion_tokens=stream_completion_tokens,
+            finish_reason=stream_finish_reason,
             latency_ms=latency,
         )
 
